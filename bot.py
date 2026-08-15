@@ -18,7 +18,6 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# GitHub Secret မှ Token ကို လုံခြုံစွာ ခေါ်ယူခြင်း
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 if not TELEGRAM_BOT_TOKEN:
@@ -48,6 +47,7 @@ except Exception as e:
 # ==========================================
 config_data = {"owner_id": None, "game_access_token": None, "auto_restart": True, "speed_multiplier": 200}
 is_running = False
+is_claim_only_mode = False  # NEW: သေနတ်မပစ်ဘဲ အငြိမ်ဝင်ရန်
 ws_conn = None
 ws_lock = threading.Lock()
 game_creds = {"username": "", "password": ""}
@@ -113,7 +113,7 @@ restart_lock = threading.Lock()
 is_restarting = False
 
 # ==========================================
-# OPTIMIZED GAME LOGIC VARIABLES - ULTRA SPEED
+# OPTIMIZED GAME LOGIC VARIABLES
 # ==========================================
 SPEED_MULTIPLIER = 200 
 bullet_speed = 1400   
@@ -121,7 +121,6 @@ fish_list = {}
 fish_lock = threading.Lock()
 last_server_time = 0  
 
-# Dragging State for Hold & Drag Angle Simulation
 current_angle_deg = 0.0
 drag_direction = 1
 
@@ -176,14 +175,21 @@ def send_ws(ws, payload_dict):
 # ==========================================
 def get_main_menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
+    # ခလုတ်များ ပြင်ဆင်ထားခြင်း
     markup.add(
-        InlineKeyboardButton("▶️ Start Bot", callback_data="cmd_start"),
+        InlineKeyboardButton("▶️ Start (Shoot)", callback_data="cmd_start"),
+        InlineKeyboardButton("🔌 Connect (No Shoot)", callback_data="cmd_connect_only")
+    )
+    markup.add(
         InlineKeyboardButton("🛑 Stop Bot", callback_data="cmd_stop"),
-        InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token"),
+        InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token")
+    )
+    markup.add(
         InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
-        InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed"),
+        InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed")
+    )
+    markup.add(
         InlineKeyboardButton("🔧 Force Restart", callback_data="cmd_force_restart"),
-        # NEW BUTTON: Claim Mission Button
         InlineKeyboardButton("🎁 Claim Mission", callback_data="cmd_claim")
     )
     return markup
@@ -200,7 +206,7 @@ def clean_and_send_menu(chat_id, text=None):
             except: pass
 
     if not text:
-        text = "🤖 *Fish Bot HYPER SPEED (2X)*\n⚡ Shoot: Held Down\n🐟 Targets: 2 fish\n🔫 Bullet Speed: 1400\n\nSelect action:"
+        text = "🤖 *Fish Bot Menu*\n\nSelect action:"
     try:
         msg = bot.send_message(chat_id, text, reply_markup=get_main_menu_markup(), parse_mode="Markdown")
         last_menu_message_id = msg.message_id
@@ -282,7 +288,7 @@ def bot_manager_loop():
                     track_and_send(config_data["owner_id"], f"🔧 *Auto Restart*\n⚠️ Error: {last_error_msg}\n🔄 Restarting now...")
                 break
             
-            if in_game and not shoot_alive and ws_conn and ws_conn.connected:
+            if in_game and not is_claim_only_mode and not shoot_alive and ws_conn and ws_conn.connected:
                 print("[MANAGER] Shoot thread died. Restarting...")
                 log_stats()
                 break
@@ -396,7 +402,7 @@ def auto_shoot_loop(ws):
 def use_4x_loop(ws):
     global use_4x_alive
     use_4x_alive = True
-    print("[GAME] 4x Fast Shoot Loop started (Every 10s).")
+    print("[GAME] 4x Fast Shoot Loop started.")
     while is_running and use_4x_alive and ws.connected and not is_restarting:
         send_ws(ws, {"route": "useItem", "data": {"type": 6}, "msgId": 0})
         time.sleep(10)
@@ -452,7 +458,8 @@ def handle_message(data, ws):
                     stats["start_balance"] = inner.get("cash", 0)
                     stats["current_balance"] = inner.get("cash", 0)
                 if config_data["owner_id"]:
-                    clean_and_send_menu(config_data["owner_id"], f"✅ *Login OK!*\n👤 {inner.get('nickname', 'User')}\n💰 Balance: {inner.get('cash', 0):,}\n\n⚡ Entering room...")
+                    mode_text = "Idle (No Shoot)" if is_claim_only_mode else "Auto Shoot"
+                    clean_and_send_menu(config_data["owner_id"], f"✅ *Login OK!*\n👤 {inner.get('nickname', 'User')}\n💰 Balance: {inner.get('cash', 0):,}\n🔌 Mode: {mode_text}\n\n⚡ Entering room...")
                 if not heartbeat_alive: threading.Thread(target=heartbeat_loop, args=(ws,), daemon=True).start()
                 time.sleep(0.5)
                 send_ws(ws, {"route": "play", "data": {"playerId": game_creds["username"], "password": game_creds["password"], "index": 0}, "msgId": 2})
@@ -466,16 +473,19 @@ def handle_message(data, ws):
             last_error_msg = f"Handler error: {str(e)}"
 
 def start_game_actions(ws):
-    global in_game
+    global in_game, is_claim_only_mode
     if not is_running or is_restarting: return
     in_game = True
     
-    print("[GAME] Activating AUTO once...")
-    send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
-    
-    send_ws(ws, {"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": bullet_speed}, "msgId": 0})
-    if not shoot_alive: threading.Thread(target=auto_shoot_loop, args=(ws,), daemon=True).start()
-    if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
+    # သေနတ်ပစ်မည့် Mode ဖြစ်မှသာ Shoot Threads များကို စတင်မည်
+    if not is_claim_only_mode:
+        print("[GAME] Activating AUTO once...")
+        send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
+        send_ws(ws, {"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": bullet_speed}, "msgId": 0})
+        if not shoot_alive: threading.Thread(target=auto_shoot_loop, args=(ws,), daemon=True).start()
+        if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
+    else:
+        print("[GAME] Entered Claim-Only mode. Idle...")
 
 # ==========================================
 # CLAIM TEST THREAD
@@ -517,67 +527,65 @@ def handle_start_cmd(message):
     elif config_data["owner_id"] != user_id: return
     clean_and_send_menu(user_id)
 
-@bot.message_handler(commands=['speed'])
-def handle_speed_cmd(message):
-    global config_data
-    user_id = message.chat.id
-    if config_data["owner_id"] != user_id: return
-    
-    try:
-        args = message.text.split()
-        if len(args) < 2:
-            bot.send_message(user_id, "ℹ️ Usage: `/speed <value>`\nExample: `/speed 500`", parse_mode="Markdown")
-            return
-            
-        new_speed = int(args[1])
-        if new_speed < 1:
-            bot.send_message(user_id, "❌ Speed must be at least 1.")
-            return
-            
-        config_data["speed_multiplier"] = new_speed
-        save_config()
-        bot.send_message(user_id, f"⚡ *Speed updated to {new_speed}x!*", parse_mode="Markdown")
-    except ValueError:
-        bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
-
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    global is_running, config_data, ws_conn
+    global is_running, config_data, ws_conn, is_claim_only_mode
     user_id = call.message.chat.id
     if config_data["owner_id"] != user_id: return
     cmd = call.data
+    
     if cmd == "cmd_start":
-        if is_running: bot.answer_callback_query(call.id, "⚠️ Already running.")
-        elif not config_data.get("game_access_token"): bot.answer_callback_query(call.id, "❌ Set token first!")
+        if is_running: 
+            bot.answer_callback_query(call.id, "⚠️ Already running.")
+        elif not config_data.get("game_access_token"): 
+            bot.answer_callback_query(call.id, "❌ Set token first!")
         else:
+            is_claim_only_mode = False
             is_running = True
             reset_session_stats()
-            bot.answer_callback_query(call.id, "⚡ Starting...")
+            bot.answer_callback_query(call.id, "⚡ Starting (Auto Shoot)...")
+            
+    elif cmd == "cmd_connect_only":
+        if is_running: 
+            bot.answer_callback_query(call.id, "⚠️ Already running. Stop bot first.")
+        elif not config_data.get("game_access_token"): 
+            bot.answer_callback_query(call.id, "❌ Set token first!")
+        else:
+            is_claim_only_mode = True
+            is_running = True
+            reset_session_stats()
+            bot.answer_callback_query(call.id, "🔌 Connecting (Idle Mode)...")
+            
     elif cmd == "cmd_stop":
         is_running = False
         bot.answer_callback_query(call.id, "🛑 Stopping...")
         clean_and_send_menu(user_id, "🔴 Bot Stopped.")
+        
     elif cmd == "cmd_force_restart":
         bot.answer_callback_query(call.id, "🔄 Restarting...")
         force_restart()
+        
     elif cmd == "cmd_token":
         msg = bot.send_message(user_id, "🔑 *Send your Game URL or Access Token:*", parse_mode="Markdown")
         bot.register_next_step_handler(msg, handle_token_input)
         bot.answer_callback_query(call.id)
+        
     elif cmd == "cmd_speed":
         current_speed = config_data.get("speed_multiplier", 200)
         msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value (e.g., 500, 1000):", parse_mode="Markdown")
         bot.register_next_step_handler(msg, handle_speed_input)
         bot.answer_callback_query(call.id)
+        
     elif cmd == "cmd_claim":
         if not ws_conn or not ws_conn.connected:
             bot.answer_callback_query(call.id, "❌ Bot သည် ဂိမ်းဆာဗာနှင့် ချိတ်ဆက်ထားခြင်း မရှိပါ။")
             return
         bot.answer_callback_query(call.id, "🎁 Claiming...")
-        # Claim လုပ်ငန်းစဉ်ကို သီးသန့် Thread ဖြင့် ခေါ်ယူခြင်း
         threading.Thread(target=execute_claim_test, args=(user_id,), daemon=True).start()
+        
     elif cmd == "cmd_status":
         status = "🟢 Running" if is_running else "🔴 Stopped"
+        mode = "Claim Only (Idle)" if is_claim_only_mode else "Auto Shoot"
         shoot = "🔥 Active" if shoot_alive else "💤 Idle"
         multiplier = config_data.get("speed_multiplier", 200)
         with stats_lock:
@@ -585,6 +593,7 @@ def handle_callback(call):
             stat_text = (
                 f"📊 *Bot Status*\n"
                 f"Status: {status}\n"
+                f"Mode: {mode}\n"
                 f"Shooting: {shoot}\n"
                 f"Speed: {multiplier}x\n"
                 f"--------------------------\n"
