@@ -18,10 +18,9 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# ⚠️ Token ကို ကုဒ်ထဲတွင် တိုက်ရိုက်မရေးဘဲ Environment Variable မှတဆင့် လုံခြုံစွာ ခေါ်ယူခြင်း
+# GitHub Secret မှ Token ကို လုံခြုံစွာ ခေါ်ယူခြင်း
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-# Token မထည့်ရသေးပါက ပရိုဂရမ်ကို ရပ်တန့်ရန်
 if not TELEGRAM_BOT_TOKEN:
     print("[CRITICAL] TELEGRAM_BOT_TOKEN is missing! Please set it in your environment variables/secrets.", flush=True)
     sys.exit(1)
@@ -108,7 +107,7 @@ cycle_pause = 5
 # ERROR MONITORING
 # ==========================================
 error_count = 0
-max_errors = 1 
+max_errors = 1 # Restart immediately on any error
 last_error_msg = "None"
 restart_lock = threading.Lock()
 is_restarting = False
@@ -116,11 +115,11 @@ is_restarting = False
 # ==========================================
 # OPTIMIZED GAME LOGIC VARIABLES - ULTRA SPEED
 # ==========================================
-SPEED_MULTIPLIER = 200 
-bullet_speed = 1400   
-fish_list = {}        
+SPEED_MULTIPLIER = 200 # GG Method: 200x Burst Speed
+bullet_speed = 1400   # Constant bullet speed from analyzed logic
+fish_list = {}        # Store fish data for targeting
 fish_lock = threading.Lock()
-last_server_time = 0  
+last_server_time = 0  # Track server timestamp for date sync
 
 # Dragging State for Hold & Drag Angle Simulation
 current_angle_deg = 0.0
@@ -162,7 +161,9 @@ def send_ws(ws, payload_dict):
             ws.send(msgpack.packb(payload_dict, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             with stats_lock:
                 stats["requests_sent"] += 1
+                # Track coin spending on shoot
                 if payload_dict.get("route") == "shoot":
+                    # Assume bullet type 1 costs 1 coin, change if needed
                     stats["coins_spent"] += 6
             return True
         except Exception as e:
@@ -248,6 +249,8 @@ def force_restart():
     
     stop_all_threads()
     time.sleep(1)
+    
+    # Re-trigger connection in manager loop
     is_restarting = False
 
 # ==========================================
@@ -366,7 +369,11 @@ def auto_shoot_loop(ws):
             
             angle_rad = math.radians(current_angle_deg)
             
+            # GG METHOD: Continuous "Hold" Shooting
+            # Instead of one big burst, we send in a tight loop to simulate holding down
             multiplier = int(config_data.get("speed_multiplier", 200))
+            
+            # We send packets in smaller batches with almost no delay to create a "held" stream effect
             batch_size = 10
             num_batches = max(1, multiplier // batch_size)
             
@@ -384,7 +391,10 @@ def auto_shoot_loop(ws):
                             "data": {"btype": 4, "skillType": 0, "fIds": target_ids, "bulletSpeed": bullet_speed},
                             "msgId": 0
                         })
+                # Extremely tiny sleep to allow network to breathe but keep "hold" feel (Adjusted for stability)
                 time.sleep(0.005)
+            
+            # Minimal delay before next target/angle update
             time.sleep(0.01)
             
         except Exception as e:
@@ -398,6 +408,7 @@ def use_4x_loop(ws):
     use_4x_alive = True
     print("[GAME] 4x Fast Shoot Loop started (Every 10s).")
     while is_running and use_4x_alive and ws.connected and not is_restarting:
+        # type: 6 is FastShootX4, sending every 10 seconds
         send_ws(ws, {"route": "useItem", "data": {"type": 6}, "msgId": 0})
         time.sleep(10)
     use_4x_alive = False
@@ -433,6 +444,7 @@ def handle_message(data, ws):
             f_id = inner.get("id")
             with fish_lock:
                 if f_id in fish_list: del fish_list[f_id]
+            # Track kills and gains
             if inner.get("playerId") == game_creds.get("username"):
                 with stats_lock:
                     stats["fish_killed"] += 1
@@ -470,6 +482,7 @@ def start_game_actions(ws):
     if not is_running or is_restarting: return
     in_game = True
     
+    # [MODIFIED] AUTO 1 click (type 4 = AUTO)
     print("[GAME] Activating AUTO once...")
     send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
     
