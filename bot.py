@@ -182,7 +182,9 @@ def get_main_menu_markup():
         InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token"),
         InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
         InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed"),
-        InlineKeyboardButton("🔧 Force Restart", callback_data="cmd_force_restart")
+        InlineKeyboardButton("🔧 Force Restart", callback_data="cmd_force_restart"),
+        # NEW BUTTON: Claim Mission Button
+        InlineKeyboardButton("🎁 Claim Mission", callback_data="cmd_claim")
     )
     return markup
 
@@ -476,6 +478,32 @@ def start_game_actions(ws):
     if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
 
 # ==========================================
+# CLAIM TEST THREAD
+# ==========================================
+def execute_claim_test(user_id):
+    global stats, ws_conn
+    bot.send_message(user_id, "⏳ claimMission ကို (၁၀) ကြိမ် ဆက်တိုက် လှမ်းပို့နေပါသည်...")
+    old_balance = stats["current_balance"]
+    claim_hex = "83a46461746181a474797065cb41e0000001400000a56d73674964cd015ea5726f757465ac636c61696d4d697373696f6e"
+    claim_bytes = bytes.fromhex(claim_hex)
+    
+    for _ in range(10):
+        if ws_conn and ws_conn.connected:
+            try:
+                ws_conn.send(claim_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
+                with stats_lock:
+                    stats["requests_sent"] += 1
+            except Exception as e:
+                print(f"[CLAIM ERROR] {e}")
+    
+    time.sleep(3)
+    new_balance = stats["current_balance"]
+    gained = new_balance - old_balance
+    
+    result_msg = f"✅ Test Complete!\n\n💰 မူလ Coin: {old_balance:,}\n💰 ယခု Coin: {new_balance:,}\n📈 တိုးလာသော Coin: +{gained:,}"
+    bot.send_message(user_id, result_msg)
+
+# ==========================================
 # TELEGRAM COMMANDS
 # ==========================================
 @bot.message_handler(commands=['start'])
@@ -512,51 +540,9 @@ def handle_speed_cmd(message):
     except ValueError:
         bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
 
-@bot.message_handler(commands=['claim'])
-def handle_claim_cmd(message):
-    global config_data, stats, ws_conn
-    user_id = message.chat.id
-    
-    if config_data["owner_id"] != user_id: 
-        return
-        
-    if not ws_conn or not ws_conn.connected:
-        bot.send_message(user_id, "❌ Bot သည် ဂိမ်းဆာဗာနှင့် မချိတ်ဆက်ရသေးပါ။ (Start Bot အရင်နှိပ်ပါ)")
-        return
-
-    bot.send_message(user_id, "⏳ claimMission ကို (၁၀) ကြိမ် ဆက်တိုက် လှမ်းပို့နေပါသည်...")
-
-    old_balance = stats["current_balance"]
-
-    # သင်ရှာတွေ့ထားသော claimMission ၏ Hex ကုဒ်
-    claim_hex = "83a46461746181a474797065cb41e0000001400000a56d73674964cd015ea5726f757465ac636c61696d4d697373696f6e"
-    claim_bytes = bytes.fromhex(claim_hex)
-
-    # Bug ရှိ/မရှိ စမ်းသပ်ရန်အတွက် Loop ပတ်၍ အမြန်လှမ်းပို့ခြင်း
-    for _ in range(10):
-        try:
-            ws_conn.send(claim_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
-            with stats_lock:
-                stats["requests_sent"] += 1
-        except Exception as e:
-            print(f"[CLAIM ERROR] {e}")
-
-    # ဆာဗာမှ Coin ပြန်ပေါင်းပေးမည့်အချိန်ကို ၃ စက္ကန့် စောင့်ခြင်း
-    time.sleep(3) 
-
-    new_balance = stats["current_balance"]
-    gained = new_balance - old_balance
-
-    result_msg = f"✅ Test Complete!\n\n"
-    result_msg += f"💰 မူလ Coin: {old_balance:,}\n"
-    result_msg += f"💰 ယခု Coin: {new_balance:,}\n"
-    result_msg += f"📈 တိုးလာသော Coin: +{gained:,}"
-
-    bot.send_message(user_id, result_msg)
-
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    global is_running, config_data
+    global is_running, config_data, ws_conn
     user_id = call.message.chat.id
     if config_data["owner_id"] != user_id: return
     cmd = call.data
@@ -583,6 +569,13 @@ def handle_callback(call):
         msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value (e.g., 500, 1000):", parse_mode="Markdown")
         bot.register_next_step_handler(msg, handle_speed_input)
         bot.answer_callback_query(call.id)
+    elif cmd == "cmd_claim":
+        if not ws_conn or not ws_conn.connected:
+            bot.answer_callback_query(call.id, "❌ Bot သည် ဂိမ်းဆာဗာနှင့် ချိတ်ဆက်ထားခြင်း မရှိပါ။")
+            return
+        bot.answer_callback_query(call.id, "🎁 Claiming...")
+        # Claim လုပ်ငန်းစဉ်ကို သီးသန့် Thread ဖြင့် ခေါ်ယူခြင်း
+        threading.Thread(target=execute_claim_test, args=(user_id,), daemon=True).start()
     elif cmd == "cmd_status":
         status = "🟢 Running" if is_running else "🔴 Stopped"
         shoot = "🔥 Active" if shoot_alive else "💤 Idle"
