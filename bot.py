@@ -107,7 +107,7 @@ cycle_pause = 5
 # ERROR MONITORING
 # ==========================================
 error_count = 0
-max_errors = 1 # Restart immediately on any error
+max_errors = 1 
 last_error_msg = "None"
 restart_lock = threading.Lock()
 is_restarting = False
@@ -115,11 +115,11 @@ is_restarting = False
 # ==========================================
 # OPTIMIZED GAME LOGIC VARIABLES - ULTRA SPEED
 # ==========================================
-SPEED_MULTIPLIER = 200 # GG Method: 200x Burst Speed
-bullet_speed = 1400   # Constant bullet speed from analyzed logic
-fish_list = {}        # Store fish data for targeting
+SPEED_MULTIPLIER = 200 
+bullet_speed = 1400   
+fish_list = {}        
 fish_lock = threading.Lock()
-last_server_time = 0  # Track server timestamp for date sync
+last_server_time = 0  
 
 # Dragging State for Hold & Drag Angle Simulation
 current_angle_deg = 0.0
@@ -161,9 +161,7 @@ def send_ws(ws, payload_dict):
             ws.send(msgpack.packb(payload_dict, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             with stats_lock:
                 stats["requests_sent"] += 1
-                # Track coin spending on shoot
                 if payload_dict.get("route") == "shoot":
-                    # Assume bullet type 1 costs 1 coin, change if needed
                     stats["coins_spent"] += 6
             return True
         except Exception as e:
@@ -249,8 +247,6 @@ def force_restart():
     
     stop_all_threads()
     time.sleep(1)
-    
-    # Re-trigger connection in manager loop
     is_restarting = False
 
 # ==========================================
@@ -336,7 +332,7 @@ def ws_recv_loop(ws):
         except: break
 
 # ==========================================
-# GAME LOOPS (RESTORED TO HOLD & SHOOT)
+# GAME LOOPS
 # ==========================================
 def heartbeat_loop(ws):
     global heartbeat_alive
@@ -358,7 +354,6 @@ def auto_shoot_loop(ws):
                 current_fish_ids = list(fish_list.keys()) 
                 if current_fish_ids: target_ids = current_fish_ids[:2]
             
-            # Angle logic
             current_angle_deg += drag_direction * 0.05
             if current_angle_deg >= 60.0:
                 current_angle_deg = 60.0
@@ -369,11 +364,7 @@ def auto_shoot_loop(ws):
             
             angle_rad = math.radians(current_angle_deg)
             
-            # GG METHOD: Continuous "Hold" Shooting
-            # Instead of one big burst, we send in a tight loop to simulate holding down
             multiplier = int(config_data.get("speed_multiplier", 200))
-            
-            # We send packets in smaller batches with almost no delay to create a "held" stream effect
             batch_size = 10
             num_batches = max(1, multiplier // batch_size)
             
@@ -391,10 +382,7 @@ def auto_shoot_loop(ws):
                             "data": {"btype": 4, "skillType": 0, "fIds": target_ids, "bulletSpeed": bullet_speed},
                             "msgId": 0
                         })
-                # Extremely tiny sleep to allow network to breathe but keep "hold" feel (Adjusted for stability)
                 time.sleep(0.005)
-            
-            # Minimal delay before next target/angle update
             time.sleep(0.01)
             
         except Exception as e:
@@ -408,7 +396,6 @@ def use_4x_loop(ws):
     use_4x_alive = True
     print("[GAME] 4x Fast Shoot Loop started (Every 10s).")
     while is_running and use_4x_alive and ws.connected and not is_restarting:
-        # type: 6 is FastShootX4, sending every 10 seconds
         send_ws(ws, {"route": "useItem", "data": {"type": 6}, "msgId": 0})
         time.sleep(10)
     use_4x_alive = False
@@ -444,7 +431,6 @@ def handle_message(data, ws):
             f_id = inner.get("id")
             with fish_lock:
                 if f_id in fish_list: del fish_list[f_id]
-            # Track kills and gains
             if inner.get("playerId") == game_creds.get("username"):
                 with stats_lock:
                     stats["fish_killed"] += 1
@@ -455,7 +441,7 @@ def handle_message(data, ws):
                 with stats_lock:
                     stats["current_balance"] = inner.get("cash", 0)
 
-        if msg_id == 1: # Login
+        if msg_id == 1: 
             if inner.get("ok"):
                 login_handled = True
                 game_creds["username"] = inner.get("username", "")
@@ -468,7 +454,7 @@ def handle_message(data, ws):
                 if not heartbeat_alive: threading.Thread(target=heartbeat_loop, args=(ws,), daemon=True).start()
                 time.sleep(0.5)
                 send_ws(ws, {"route": "play", "data": {"playerId": game_creds["username"], "password": game_creds["password"], "index": 0}, "msgId": 2})
-        elif msg_id == 2: # Play
+        elif msg_id == 2: 
             if inner.get("ok"):
                 play_handled = True
                 start_game_actions(ws)
@@ -482,7 +468,6 @@ def start_game_actions(ws):
     if not is_running or is_restarting: return
     in_game = True
     
-    # [MODIFIED] AUTO 1 click (type 4 = AUTO)
     print("[GAME] Activating AUTO once...")
     send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
     
@@ -524,9 +509,50 @@ def handle_speed_cmd(message):
         config_data["speed_multiplier"] = new_speed
         save_config()
         bot.send_message(user_id, f"⚡ *Speed updated to {new_speed}x!*", parse_mode="Markdown")
-        print(f"[CONFIG] Speed updated to {new_speed}x by user.")
     except ValueError:
         bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
+
+@bot.message_handler(commands=['claim'])
+def handle_claim_cmd(message):
+    global config_data, stats, ws_conn
+    user_id = message.chat.id
+    
+    if config_data["owner_id"] != user_id: 
+        return
+        
+    if not ws_conn or not ws_conn.connected:
+        bot.send_message(user_id, "❌ Bot သည် ဂိမ်းဆာဗာနှင့် မချိတ်ဆက်ရသေးပါ။ (Start Bot အရင်နှိပ်ပါ)")
+        return
+
+    bot.send_message(user_id, "⏳ claimMission ကို (၁၀) ကြိမ် ဆက်တိုက် လှမ်းပို့နေပါသည်...")
+
+    old_balance = stats["current_balance"]
+
+    # သင်ရှာတွေ့ထားသော claimMission ၏ Hex ကုဒ်
+    claim_hex = "83a46461746181a474797065cb41e0000001400000a56d73674964cd015ea5726f757465ac636c61696d4d697373696f6e"
+    claim_bytes = bytes.fromhex(claim_hex)
+
+    # Bug ရှိ/မရှိ စမ်းသပ်ရန်အတွက် Loop ပတ်၍ အမြန်လှမ်းပို့ခြင်း
+    for _ in range(10):
+        try:
+            ws_conn.send(claim_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
+            with stats_lock:
+                stats["requests_sent"] += 1
+        except Exception as e:
+            print(f"[CLAIM ERROR] {e}")
+
+    # ဆာဗာမှ Coin ပြန်ပေါင်းပေးမည့်အချိန်ကို ၃ စက္ကန့် စောင့်ခြင်း
+    time.sleep(3) 
+
+    new_balance = stats["current_balance"]
+    gained = new_balance - old_balance
+
+    result_msg = f"✅ Test Complete!\n\n"
+    result_msg += f"💰 မူလ Coin: {old_balance:,}\n"
+    result_msg += f"💰 ယခု Coin: {new_balance:,}\n"
+    result_msg += f"📈 တိုးလာသော Coin: +{gained:,}"
+
+    bot.send_message(user_id, result_msg)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
