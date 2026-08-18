@@ -153,19 +153,26 @@ def save_config():
 load_config()
 
 # ==========================================
-# UTILS
+# UTILS (MODIFIED TOKEN PARSER)
 # ==========================================
 def parse_game_url(url_or_token):
     url_or_token = url_or_token.strip()
-    if "fishmya" in url_or_token or url_or_token.startswith("http"):
+    
+    # 1. URL ပုံစံဖြစ်ပါက access_token ကို ထုတ်ယူမည်
+    if "http://" in url_or_token or "https://" in url_or_token:
         parsed = urlparse(url_or_token)
         params = parse_qs(parsed.query)
         token = params.get("access_token", [None])[0]
-        if not token:
-            return None
-        return token
-    else:
-        return url_or_token if url_or_token.startswith("eyJ") else None
+        if token:
+            return token
+        return None
+    
+    # 2. URL မဟုတ်ဘဲ ရိုးရိုး Token အကြမ်း (Raw Token) ဖြစ်ပါက အားလုံးကို လက်ခံမည်
+    # အနည်းဆုံး ဂဏန်း/စာလုံး ၁၀ လုံးထက်ကျော်လျှင် Token အဖြစ် ယူဆမည်
+    if len(url_or_token) > 10:
+        return url_or_token
+        
+    return None
 
 def next_msg_id():
     global msg_id_counter
@@ -194,7 +201,6 @@ def send_ws(ws, payload_dict):
 # TELEGRAM UI & AUTO-DELETE CLEANUP
 # ==========================================
 def send_and_auto_delete(chat_id, text, delay=10, markup=None, parse_mode="Markdown"):
-    """စာများကို ပို့ပြီး (delay) စက္ကန့်အကြာတွင် အလိုအလျောက် ဖျက်ပေးသည့် လုပ်ဆောင်ချက်"""
     try:
         msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
         def delete_task():
@@ -281,7 +287,6 @@ def clean_and_send_menu(chat_id, text=None, markup=None):
         print(f"[UI] Error sending menu: {e}")
 
 def track_and_send(chat_id, text, markup=None, auto_delete=True, delay=15):
-    """ဆာဗာမှ ပြန်လာသည့် အချက်အလက်များကို ပို့ပေးပြီး အချိန်ခဏအကြာတွင် ဖျက်ပေးမည်"""
     try:
         msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         if auto_delete:
@@ -788,14 +793,28 @@ def handle_callback(call):
 def handle_token_input(message):
     global config_data
     user_id = message.chat.id
+    
+    # ပြင်ဆင်ထားသော Token Parser ကို အသုံးပြုမည်
     token = parse_game_url(message.text.strip())
+    
     if not token:
-        send_and_auto_delete(user_id, "❌ Invalid. Try again.")
+        send_and_auto_delete(user_id, "❌ Invalid Token သို့မဟုတ် URL ဖြစ်နေပါသည်။ ပြန်လည်ကြိုးစားကြည့်ပါ။")
         return
+        
     config_data["game_access_token"] = token
     save_config()
-    clean_and_send_menu(user_id, "✅ Token updated!")
-    bot.delete_message(user_id, message.message_id)  
+    
+    # Token အသစ်ထည့်ပြီးပါက Auto-Reconnect လုပ်ပေးမည့် စနစ်
+    if is_running:
+        force_restart()
+        send_and_auto_delete(user_id, "✅ Token အသစ်ပြောင်းပြီး ဆာဗာသို့ ပြန်လည်ချိတ်ဆက်နေပါသည်...")
+    else:
+        clean_and_send_menu(user_id, "✅ Token အသစ်ပြောင်းပြီးပါပြီ။ 'Start Bot' ကို နှိပ်ပါ။")
+        
+    try:
+        bot.delete_message(user_id, message.message_id)  
+    except:
+        pass
 
 def handle_speed_input(message):
     global config_data
