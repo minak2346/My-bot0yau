@@ -18,6 +18,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # CONFIGURATION
 # ==========================================
+# GitHub Secret မှ Token ကို လုံခြုံစွာ ခေါ်ယူခြင်း
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 if not TELEGRAM_BOT_TOKEN:
@@ -47,7 +48,7 @@ except Exception as e:
 # ==========================================
 config_data = {"owner_id": None, "game_access_token": None, "auto_restart": True, "speed_multiplier": 200}
 is_running = False
-is_claim_only_mode = False  # NEW: သေနတ်မပစ်ဘဲ အငြိမ်ဝင်ရန်
+login_only_mode = False  
 ws_conn = None
 ws_lock = threading.Lock()
 game_creds = {"username": "", "password": ""}
@@ -63,6 +64,19 @@ use_4x_alive = False
 in_game = False
 login_handled = False
 play_handled = False
+
+# ==========================================
+# LUCKY WHEEL (UNLIMITED EXCHANGE)
+# ==========================================
+GOLD_PER_SPIN = 20000
+msg_id_counter = 9999  
+msg_id_lock = threading.Lock()
+pending_requests = {}  
+request_lock = threading.Lock()
+
+# Persistent lucky wheel state
+lw_state = {"spins": None, "cost_per_spin": None, "gold": None}
+lw_state_lock = threading.Lock()
 
 # ==========================================
 # STATISTICS TRACKING
@@ -113,7 +127,7 @@ restart_lock = threading.Lock()
 is_restarting = False
 
 # ==========================================
-# OPTIMIZED GAME LOGIC VARIABLES
+# OPTIMIZED GAME LOGIC VARIABLES - ULTRA SPEED
 # ==========================================
 SPEED_MULTIPLIER = 200 
 bullet_speed = 1400   
@@ -153,6 +167,12 @@ def parse_game_url(url_or_token):
     else:
         return url_or_token if url_or_token.startswith("eyJ") else None
 
+def next_msg_id():
+    global msg_id_counter
+    with msg_id_lock:
+        msg_id_counter += 1
+        return msg_id_counter
+
 def send_ws(ws, payload_dict):
     global error_count, last_error_msg, stats
     if ws and ws.connected:
@@ -171,62 +191,109 @@ def send_ws(ws, payload_dict):
     return False
 
 # ==========================================
-# TELEGRAM UI & CLEANUP
+# TELEGRAM UI & AUTO-DELETE CLEANUP
 # ==========================================
+def send_and_auto_delete(chat_id, text, delay=10, markup=None, parse_mode="Markdown"):
+    """စာများကို ပို့ပြီး (delay) စက္ကန့်အကြာတွင် အလိုအလျောက် ဖျက်ပေးသည့် လုပ်ဆောင်ချက်"""
+    try:
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode=parse_mode)
+        def delete_task():
+            time.sleep(delay)
+            try:
+                bot.delete_message(chat_id, msg.message_id)
+            except:
+                pass
+        threading.Thread(target=delete_task, daemon=True).start()
+        return msg
+    except Exception as e:
+        print(f"[UI] Error sending auto-delete message: {e}")
+        return None
+
 def get_main_menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
-    # ခလုတ်များ ပြင်ဆင်ထားခြင်း
     markup.add(
-        InlineKeyboardButton("▶️ Start (Shoot)", callback_data="cmd_start"),
-        InlineKeyboardButton("🔌 Connect (No Shoot)", callback_data="cmd_connect_only")
-    )
-    markup.add(
+        InlineKeyboardButton("▶️ Start Bot", callback_data="cmd_start"),
         InlineKeyboardButton("🛑 Stop Bot", callback_data="cmd_stop"),
-        InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token")
-    )
-    markup.add(
+        InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token"),
         InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
-        InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed")
-    )
-    markup.add(
+        InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed"),
         InlineKeyboardButton("🔧 Force Restart", callback_data="cmd_force_restart"),
-        InlineKeyboardButton("🎁 Claim Mission", callback_data="cmd_claim")
+        InlineKeyboardButton("🎡 Lucky Wheel", callback_data="cmd_lucky_menu"),
+        InlineKeyboardButton("💱 Exchange Spins", callback_data="cmd_buy_menu"),
+        InlineKeyboardButton("🔐 Login Only", callback_data="cmd_login_only")
     )
     return markup
 
-def clean_and_send_menu(chat_id, text=None):
+def get_buy_menu_markup(max_affordable):
+    EXCHANGE_PRESETS = [
+        (99999, "99,999"), (500000, "500K"), (1000000, "1M"),
+        (5000000, "5M"), (10000000, "10M"), (9999999, "MAX🔥"),
+    ]
+    markup = InlineKeyboardMarkup(row_width=3)
+    for amount, label in EXCHANGE_PRESETS:
+        if label == "MAX🔥":
+            markup.add(InlineKeyboardButton(f"💱 MAX ({max_affordable:,})", callback_data=f"buy_{max_affordable}"))
+        else:
+            markup.add(InlineKeyboardButton(f"💱 {label}", callback_data=f"buy_{amount}"))
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data="cmd_lucky_menu"))
+    return markup
+
+def get_lucky_menu_markup():
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🎰 Lucky Balance", callback_data="cmd_lucky_balance"),
+        InlineKeyboardButton("💱 Exchange", callback_data="cmd_buy_menu"),
+        InlineKeyboardButton("🔙 Main Menu", callback_data="cmd_back")
+    )
+    return markup
+
+def do_exchange(ws, amount, chat_id):
+    mid = next_msg_id()
+    with request_lock:
+        pending_requests[mid] = {"route": "buyLuckySpin", "amount": amount, "time": time.time()}
+    with ws_lock:
+        if not (ws and ws.connected):
+            return "❌ Game connection မရှိ — ဦးစွာ Start Bot နှိပ့်ပါ"
+        if not send_ws(ws, {"route": "buyLuckySpin", "data": {"count": amount}, "msgId": mid}):
+            return "❌ Send failed"
+    return f"⏳ လုက်ခွင့့် **{amount:,}** လဲလှယ့်မှု ပို့ပြီးပါပြီ — တုံ့ပြန်မှု စောင့်နေပါတယ်..."
+
+def do_get_lucky_spin(ws):
+    mid = next_msg_id()
+    with request_lock:
+        pending_requests[mid] = {"route": "getLuckySpin", "time": time.time()}
+    send_ws(ws, {"route": "getLuckySpin", "data": {}, "msgId": mid})
+
+def clean_and_send_menu(chat_id, text=None, markup=None):
     global last_menu_message_id
     with msg_lock:
-        for msg_id in sent_messages:
-            try: bot.delete_message(chat_id, msg_id)
-            except: pass
-        sent_messages.clear()
         if last_menu_message_id:
             try: bot.delete_message(chat_id, last_menu_message_id)
             except: pass
 
     if not text:
-        text = "🤖 *Fish Bot Menu*\n\nSelect action:"
+        text = "🤖 *Fish Bot HYPER SPEED (2X)*\n⚡ Shoot: Held Down\n🐟 Targets: 2 fish\n🔫 Bullet Speed: 1400\n\nSelect action:"
     try:
-        msg = bot.send_message(chat_id, text, reply_markup=get_main_menu_markup(), parse_mode="Markdown")
+        markup = markup if markup is not None else get_main_menu_markup()
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         last_menu_message_id = msg.message_id
     except Exception as e:
         print(f"[UI] Error sending menu: {e}")
 
-def track_and_send(chat_id, text, markup=None):
-    global sent_messages
-    with msg_lock:
-        if len(sent_messages) >= 3:
-            oldest = sent_messages.pop(0)
-            try: bot.delete_message(chat_id, oldest)
-            except: pass
-        try:
-            msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
-            sent_messages.append(msg.message_id)
-            return msg
-        except Exception as e:
-            print(f"[UI] Error sending message: {e}")
-            return None
+def track_and_send(chat_id, text, markup=None, auto_delete=True, delay=15):
+    """ဆာဗာမှ ပြန်လာသည့် အချက်အလက်များကို ပို့ပေးပြီး အချိန်ခဏအကြာတွင် ဖျက်ပေးမည်"""
+    try:
+        msg = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        if auto_delete:
+            def delete_task():
+                time.sleep(delay)
+                try: bot.delete_message(chat_id, msg.message_id)
+                except: pass
+            threading.Thread(target=delete_task, daemon=True).start()
+        return msg
+    except Exception as e:
+        print(f"[UI] Error sending track message: {e}")
+        return None
 
 def stop_all_threads():
     global heartbeat_alive, shoot_alive, use_4x_alive, login_handled, play_handled, in_game
@@ -244,15 +311,12 @@ def force_restart():
     with restart_lock:
         if is_restarting: return
         is_restarting = True
-    
     print("[RESTART] Executing restart...")
     error_count = 0
-    
     with ws_lock:
         if ws_conn:
             try: ws_conn.close()
             except: pass
-    
     stop_all_threads()
     time.sleep(1)
     is_restarting = False
@@ -262,39 +326,31 @@ def force_restart():
 # ==========================================
 def bot_manager_loop():
     global is_running, ws_conn, error_count, last_error_msg, is_restarting
-    
     print("[MANAGER] Started.")
     while True:
         if not is_running:
             time.sleep(1)
             continue
-            
         print("[MANAGER] Attempting connection...")
         start_ws_connection()
-        
         start_time = time.time()
         while is_running and not is_restarting:
             elapsed = time.time() - start_time
-            
             if elapsed >= cycle_duration:
                 print(f"[MANAGER] Cycle finished ({cycle_duration}s). Pausing...")
                 log_stats()
                 break
-                
             if error_count >= max_errors:
                 print(f"[MANAGER] Max errors reached ({error_count}). Restarting...")
                 log_stats()
                 if config_data["owner_id"]:
-                    track_and_send(config_data["owner_id"], f"🔧 *Auto Restart*\n⚠️ Error: {last_error_msg}\n🔄 Restarting now...")
+                    send_and_auto_delete(config_data["owner_id"], f"🔧 *Auto Restart*\n⚠️ Error: {last_error_msg}\n🔄 Restarting now...")
                 break
-            
-            if in_game and not is_claim_only_mode and not shoot_alive and ws_conn and ws_conn.connected:
+            if in_game and not shoot_alive and ws_conn and ws_conn.connected:
                 print("[MANAGER] Shoot thread died. Restarting...")
                 log_stats()
                 break
-                
             time.sleep(1)
-            
         print("[MANAGER] Closing connection for next phase...")
         with restart_lock: is_restarting = True
         with ws_lock:
@@ -304,28 +360,21 @@ def bot_manager_loop():
             ws_conn = None
         stop_all_threads()
         error_count = 0
-        
         if is_running:
             print(f"[MANAGER] Pausing for {cycle_pause}s...")
             time.sleep(cycle_pause)
-        
         with restart_lock: is_restarting = False
 
 def start_ws_connection():
     global ws_conn
     token = config_data.get("game_access_token")
     if not token: return
-
     url = f"{WS_URL}?access_token={token}"
     try:
-        conn = websocket.create_connection(
-            url, header=WS_HEADERS, sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=30
-        )
+        conn = websocket.create_connection(url, header=WS_HEADERS, sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=30)
         with ws_lock: ws_conn = conn
-        
         print("[WS] Connected. Sending login...")
         send_ws(conn, {"route": "mytelLogin", "data": {"accessToken": token, "language": "my"}, "msgId": 1})
-        
         threading.Thread(target=ws_recv_loop, args=(conn,), daemon=True).start()
     except Exception as e:
         print(f"[WS] Connection failed: {e}")
@@ -353,8 +402,6 @@ def heartbeat_loop(ws):
 def auto_shoot_loop(ws):
     global shoot_alive, current_angle_deg, drag_direction
     shoot_alive = True
-    print(f"[GAME] GG Speed Hack Active (Multiplier: {SPEED_MULTIPLIER})")
-    
     while is_running and shoot_alive and ws.connected and not is_restarting:
         try:
             target_ids = []
@@ -371,7 +418,6 @@ def auto_shoot_loop(ws):
                 drag_direction = 1
             
             angle_rad = math.radians(current_angle_deg)
-            
             multiplier = int(config_data.get("speed_multiplier", 200))
             batch_size = 10
             num_batches = max(1, multiplier // batch_size)
@@ -392,17 +438,14 @@ def auto_shoot_loop(ws):
                         })
                 time.sleep(0.005)
             time.sleep(0.01)
-            
         except Exception as e:
             print(f"[GG-SPEED] Loop Error: {e}")
             break
-            
     shoot_alive = False
 
 def use_4x_loop(ws):
     global use_4x_alive
     use_4x_alive = True
-    print("[GAME] 4x Fast Shoot Loop started.")
     while is_running and use_4x_alive and ws.connected and not is_restarting:
         send_ws(ws, {"route": "useItem", "data": {"type": 6}, "msgId": 0})
         time.sleep(10)
@@ -443,11 +486,55 @@ def handle_message(data, ws):
                 with stats_lock:
                     stats["fish_killed"] += 1
                     stats["coins_gained"] += inner.get("cash", 0)
-
         elif route == "OnUpdateCash":
             if inner.get("playerId") == game_creds.get("username"):
                 with stats_lock:
                     stats["current_balance"] = inner.get("cash", 0)
+                with lw_state_lock:
+                    lw_state["gold"] = inner.get("cash", 0)
+
+        with request_lock:
+            pending = pending_requests.get(msg_id)
+        if pending and msg_id >= 10000:
+            with request_lock:
+                pending_requests.pop(msg_id, None)
+            if pending["route"] == "buyLuckySpin":
+                if inner.get("code") == 0:
+                    with lw_state_lock:
+                        lw_state["gold"] = inner.get("cash", lw_state.get("gold"))
+                        lw_state["spins"] = None
+                    if config_data["owner_id"]:
+                        track_and_send(
+                            config_data["owner_id"],
+                            f"✅ *လဲလှယ်မှု အောင်မြင်ပါပြီ!*\n\n"
+                            f"🎰 လဲလှယ်ပြီး: **{pending.get('amount', '?'):,}** လုက်ခွင့်\n"
+                            f"🪙 Gold အသစ်: **{inner.get('cash', 0):,}**\n\n"
+                            f"⚠️ ရွှေ နုတ်ထုတ်သွားမှု: **{pending.get('amount', 0) * GOLD_PER_SPIN:,}**",
+                            get_buy_menu_markup(inner.get("cash", 0) // GOLD_PER_SPIN),
+                            auto_delete=True, delay=20
+                        )
+                else:
+                    if config_data["owner_id"]:
+                        send_and_auto_delete(config_data["owner_id"], f"❌ *လဲလှယ်မှု ကျရှုံး*\nCode: {inner.get('code')}\nMsg: {inner.get('msg', '—')}")
+            elif pending["route"] == "getLuckySpin":
+                spin = inner.get("spin")
+                cost = inner.get("cost")
+                with lw_state_lock:
+                    lw_state["spins"] = spin
+                    lw_state["cost_per_spin"] = cost
+                if config_data["owner_id"]:
+                    gold = lw_state.get("gold") or 0
+                    max_buy = gold // GOLD_PER_SPIN if gold else 0
+                    track_and_send(
+                        config_data["owner_id"],
+                        f"🎡 *Lucky Wheel Status*\n\n"
+                        f"🎰 လုက်ခွင့်: **{spin:,}**\n"
+                        f"🔁 တစ်ခြုကျ: **{cost:,}** gold\n"
+                        f"🪙 Gold: **{gold:,}**\n"
+                        f"💱 အများဆုံး လဲလို့ရ: **{max_buy:,}**",
+                        get_buy_menu_markup(max_buy),
+                        auto_delete=True, delay=20
+                    )
 
         if msg_id == 1: 
             if inner.get("ok"):
@@ -457,12 +544,23 @@ def handle_message(data, ws):
                 with stats_lock:
                     stats["start_balance"] = inner.get("cash", 0)
                     stats["current_balance"] = inner.get("cash", 0)
+                with lw_state_lock:
+                    lw_state["gold"] = inner.get("cash", 0)
                 if config_data["owner_id"]:
-                    mode_text = "Idle (No Shoot)" if is_claim_only_mode else "Auto Shoot"
-                    clean_and_send_menu(config_data["owner_id"], f"✅ *Login OK!*\n👤 {inner.get('nickname', 'User')}\n💰 Balance: {inner.get('cash', 0):,}\n🔌 Mode: {mode_text}\n\n⚡ Entering room...")
+                    if login_only_mode:
+                        send_and_auto_delete(
+                            config_data["owner_id"],
+                            f"✅ *Login OK (Login Only Mode)*\n👤 {inner.get('nickname', 'User')}\n💰 Gold: **{inner.get('cash', 0):,}**",
+                            delay=10
+                        )
+                    else:
+                        send_and_auto_delete(config_data["owner_id"], f"✅ *Login OK!*\n👤 {inner.get('nickname', 'User')}\n💰 Balance: {inner.get('cash', 0):,}\n\n⚡ Entering room...", delay=10)
                 if not heartbeat_alive: threading.Thread(target=heartbeat_loop, args=(ws,), daemon=True).start()
                 time.sleep(0.5)
-                send_ws(ws, {"route": "play", "data": {"playerId": game_creds["username"], "password": game_creds["password"], "index": 0}, "msgId": 2})
+                if not login_only_mode:
+                    send_ws(ws, {"route": "play", "data": {"playerId": game_creds["username"], "password": game_creds["password"], "index": 0}, "msgId": 2})
+                if login_only_mode:
+                    do_get_lucky_spin(ws)
         elif msg_id == 2: 
             if inner.get("ok"):
                 play_handled = True
@@ -473,45 +571,13 @@ def handle_message(data, ws):
             last_error_msg = f"Handler error: {str(e)}"
 
 def start_game_actions(ws):
-    global in_game, is_claim_only_mode
+    global in_game
     if not is_running or is_restarting: return
     in_game = True
-    
-    # သေနတ်ပစ်မည့် Mode ဖြစ်မှသာ Shoot Threads များကို စတင်မည်
-    if not is_claim_only_mode:
-        print("[GAME] Activating AUTO once...")
-        send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
-        send_ws(ws, {"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": bullet_speed}, "msgId": 0})
-        if not shoot_alive: threading.Thread(target=auto_shoot_loop, args=(ws,), daemon=True).start()
-        if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
-    else:
-        print("[GAME] Entered Claim-Only mode. Idle...")
-
-# ==========================================
-# CLAIM TEST THREAD
-# ==========================================
-def execute_claim_test(user_id):
-    global stats, ws_conn
-    bot.send_message(user_id, "⏳ claimMission ကို (၁၀) ကြိမ် ဆက်တိုက် လှမ်းပို့နေပါသည်...")
-    old_balance = stats["current_balance"]
-    claim_hex = "83a46461746181a474797065cb41e0000001400000a56d73674964cd015ea5726f757465ac636c61696d4d697373696f6e"
-    claim_bytes = bytes.fromhex(claim_hex)
-    
-    for _ in range(10):
-        if ws_conn and ws_conn.connected:
-            try:
-                ws_conn.send(claim_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
-                with stats_lock:
-                    stats["requests_sent"] += 1
-            except Exception as e:
-                print(f"[CLAIM ERROR] {e}")
-    
-    time.sleep(3)
-    new_balance = stats["current_balance"]
-    gained = new_balance - old_balance
-    
-    result_msg = f"✅ Test Complete!\n\n💰 မူလ Coin: {old_balance:,}\n💰 ယခု Coin: {new_balance:,}\n📈 တိုးလာသော Coin: +{gained:,}"
-    bot.send_message(user_id, result_msg)
+    send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
+    send_ws(ws, {"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": bullet_speed}, "msgId": 0})
+    if not shoot_alive: threading.Thread(target=auto_shoot_loop, args=(ws,), daemon=True).start()
+    if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
 
 # ==========================================
 # TELEGRAM COMMANDS
@@ -523,102 +589,213 @@ def handle_start_cmd(message):
     if config_data["owner_id"] is None:
         config_data["owner_id"] = user_id
         save_config()
-        bot.send_message(user_id, "👑 You are now the Owner!")
+        send_and_auto_delete(user_id, "👑 You are now the Owner!")
     elif config_data["owner_id"] != user_id: return
     clean_and_send_menu(user_id)
 
+@bot.message_handler(commands=['speed'])
+def handle_speed_cmd(message):
+    global config_data
+    user_id = message.chat.id
+    if config_data["owner_id"] != user_id: return
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            send_and_auto_delete(user_id, "ℹ️ Usage: `/speed <value>`\nExample: `/speed 500`")
+            return
+        new_speed = int(args[1])
+        if new_speed < 1:
+            send_and_auto_delete(user_id, "❌ Speed must be at least 1.")
+            return
+        config_data["speed_multiplier"] = new_speed
+        save_config()
+        send_and_auto_delete(user_id, f"⚡ *Speed updated to {new_speed}x!*")
+    except ValueError:
+        send_and_auto_delete(user_id, "❌ Invalid number. Please enter an integer.")
+
+@bot.message_handler(commands=['buy', 'exchange'])
+def handle_buy_cmd(message):
+    user_id = message.chat.id
+    if config_data["owner_id"] != user_id: return
+    args = message.text.split()
+    if len(args) < 2:
+        send_and_auto_delete(user_id, "ℹ️ Usage: `/buy <amount>`\nExample: `/buy 1000000`\n`/buy max` — Gold အကုန်နဲ့ အများဆုံးလဲ")
+        return
+    amount_raw = args[1].strip().lower().replace(",", "").replace(".", "")
+    if amount_raw == "max":
+        with lw_state_lock:
+            gold = lw_state.get("gold") or stats.get("current_balance", 0)
+        amount = gold // GOLD_PER_SPIN if gold else 0
+        if amount <= 0:
+            send_and_auto_delete(user_id, "❌ Gold မရှိ — token စစ်ပါ")
+            return
+    else:
+        try:
+            amount = int(amount_raw)
+        except ValueError:
+            send_and_auto_delete(user_id, "❌ Invalid number.")
+            return
+    if amount <= 0:
+        send_and_auto_delete(user_id, "❌ Amount must be > 0")
+        return
+    with ws_lock:
+        conn = ws_conn
+    if not (conn and conn.connected):
+        send_and_auto_delete(user_id, "❌ Game connection မရှိ — ဦးစွာ Start Bot နှိပ့်ပါ")
+        return
+    result = do_exchange(conn, amount, user_id)
+    send_and_auto_delete(user_id, result)
+
+@bot.message_handler(commands=['lucky'])
+def handle_lucky_cmd(message):
+    user_id = message.chat.id
+    if config_data["owner_id"] != user_id: return
+    with ws_lock:
+        conn = ws_conn
+    if not (conn and conn.connected):
+        send_and_auto_delete(user_id, "❌ Game connection မရှိ — ဦးစွာ Start Bot နှိပ့်ပါ")
+        return
+    send_and_auto_delete(user_id, "⏳ လုက်ခွင့့် ဘလန်စ် စစ်နေပါတယ်...", delay=5)
+    do_get_lucky_spin(conn)
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    global is_running, config_data, ws_conn, is_claim_only_mode
-    user_id = call.message.chat.id
-    if config_data["owner_id"] != user_id: return
-    cmd = call.data
-    
-    if cmd == "cmd_start":
-        if is_running: 
-            bot.answer_callback_query(call.id, "⚠️ Already running.")
-        elif not config_data.get("game_access_token"): 
-            bot.answer_callback_query(call.id, "❌ Set token first!")
-        else:
-            is_claim_only_mode = False
+    global is_running, config_data, login_only_mode
+    try:
+        user_id = call.message.chat.id
+        if config_data["owner_id"] != user_id: return
+        cmd = call.data
+        if cmd == "cmd_start":
+            if is_running: bot.answer_callback_query(call.id, "⚠️ Already running.")
+            elif not config_data.get("game_access_token"): bot.answer_callback_query(call.id, "❌ Set token first!")
+            else:
+                is_running = True
+                reset_session_stats()
+                bot.answer_callback_query(call.id, "⚡ Starting...")
+        elif cmd == "cmd_stop":
+            is_running = False
+            login_only_mode = False
+            bot.answer_callback_query(call.id, "🛑 Stopping...")
+            clean_and_send_menu(user_id, "🔴 Bot Stopped.")
+        elif cmd == "cmd_force_restart":
+            bot.answer_callback_query(call.id, "🔄 Restarting...")
+            force_restart()
+        elif cmd == "cmd_login_only":
+            bot.answer_callback_query(call.id, "🔐 Login Only mode နှိပ့်ပီး...")
+            if is_running:
+                send_and_auto_delete(user_id, "⚠️ *Login Only* မသုံးမီ *Stop Bot* နှိပ့်ပေးပါ\n(လက်ရှိ ငါးပစ့် mode ဖြစ့်နေလို့)")
+                return
+            login_only_mode = True
             is_running = True
-            reset_session_stats()
-            bot.answer_callback_query(call.id, "⚡ Starting (Auto Shoot)...")
-            
-    elif cmd == "cmd_connect_only":
-        if is_running: 
-            bot.answer_callback_query(call.id, "⚠️ Already running. Stop bot first.")
-        elif not config_data.get("game_access_token"): 
-            bot.answer_callback_query(call.id, "❌ Set token first!")
-        else:
-            is_claim_only_mode = True
-            is_running = True
-            reset_session_stats()
-            bot.answer_callback_query(call.id, "🔌 Connecting (Idle Mode)...")
-            
-    elif cmd == "cmd_stop":
-        is_running = False
-        bot.answer_callback_query(call.id, "🛑 Stopping...")
-        clean_and_send_menu(user_id, "🔴 Bot Stopped.")
-        
-    elif cmd == "cmd_force_restart":
-        bot.answer_callback_query(call.id, "🔄 Restarting...")
-        force_restart()
-        
-    elif cmd == "cmd_token":
-        msg = bot.send_message(user_id, "🔑 *Send your Game URL or Access Token:*", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, handle_token_input)
-        bot.answer_callback_query(call.id)
-        
-    elif cmd == "cmd_speed":
-        current_speed = config_data.get("speed_multiplier", 200)
-        msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value (e.g., 500, 1000):", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, handle_speed_input)
-        bot.answer_callback_query(call.id)
-        
-    elif cmd == "cmd_claim":
-        if not ws_conn or not ws_conn.connected:
-            bot.answer_callback_query(call.id, "❌ Bot သည် ဂိမ်းဆာဗာနှင့် ချိတ်ဆက်ထားခြင်း မရှိပါ။")
-            return
-        bot.answer_callback_query(call.id, "🎁 Claiming...")
-        threading.Thread(target=execute_claim_test, args=(user_id,), daemon=True).start()
-        
-    elif cmd == "cmd_status":
-        status = "🟢 Running" if is_running else "🔴 Stopped"
-        mode = "Claim Only (Idle)" if is_claim_only_mode else "Auto Shoot"
-        shoot = "🔥 Active" if shoot_alive else "💤 Idle"
-        multiplier = config_data.get("speed_multiplier", 200)
-        with stats_lock:
-            profit = stats["coins_gained"] - stats["coins_spent"]
-            stat_text = (
-                f"📊 *Bot Status*\n"
-                f"Status: {status}\n"
-                f"Mode: {mode}\n"
-                f"Shooting: {shoot}\n"
-                f"Speed: {multiplier}x\n"
-                f"--------------------------\n"
-                f"📡 Requests: {stats['requests_sent']}\n"
-                f"💸 Spent: {stats['coins_spent']:,}\n"
-                f"💰 Gained: {stats['coins_gained']:,}\n"
-                f"📈 Profit: {profit:,}\n"
-                f"🐟 Kills: {stats['fish_killed']}\n"
-                f"🏦 Balance: {stats['current_balance']:,}\n"
-                f"--------------------------\n"
-                f"Cycle: {cycle_duration}s run / {cycle_pause}s pause"
-            )
-        clean_and_send_menu(user_id, stat_text)
-        bot.answer_callback_query(call.id)
+            with stats_lock:
+                stats["coins_gained"] = 0
+                stats["coins_spent"] = 0
+                stats["fish_killed"] = 0
+            clean_and_send_menu(user_id, "🔐 *Login Only Mode* စနေပါပြီ\n\n💡 Login ပဲ ၀င်ပါမယ် — room မ၀င်ဘဲ ငါးလည်း မပစ်ပါ။\n🎡 Lucky Wheel လဲလှယ်ခွင့် သီးသန့် သုံးနိုင်ပါပြီ။")
+        elif cmd == "cmd_token":
+            msg = bot.send_message(user_id, "🔑 *Send your Game URL or Access Token:*", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, handle_token_input)
+            bot.answer_callback_query(call.id)
+        elif cmd == "cmd_speed":
+            current_speed = config_data.get("speed_multiplier", 200)
+            msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value (e.g., 500, 1000):", parse_mode="Markdown")
+            bot.register_next_step_handler(msg, handle_speed_input)
+            bot.answer_callback_query(call.id)
+        elif cmd == "cmd_status":
+            status = "🟢 Running" if is_running else "🔴 Stopped"
+            shoot = "🔥 Active" if shoot_alive else "💤 Idle"
+            multiplier = config_data.get("speed_multiplier", 200)
+            with stats_lock:
+                profit = stats["coins_gained"] - stats["coins_spent"]
+                stat_text = (
+                    f"📊 *Bot Status*\n"
+                    f"Status: {status}\n"
+                    f"Shooting: {shoot}\n"
+                    f"Speed: {multiplier}x\n"
+                    f"--------------------------\n"
+                    f"📡 Requests: {stats['requests_sent']}\n"
+                    f"💸 Spent: {stats['coins_spent']:,}\n"
+                    f"💰 Gained: {stats['coins_gained']:,}\n"
+                    f"📈 Profit: {profit:,}\n"
+                    f"🐟 Kills: {stats['fish_killed']}\n"
+                    f"🏦 Balance: {stats['current_balance']:,}\n"
+                    f"--------------------------\n"
+                    f"Cycle: {cycle_duration}s run / {cycle_pause}s pause"
+                )
+            track_and_send(user_id, stat_text, auto_delete=True, delay=20)
+            bot.answer_callback_query(call.id)
+        elif cmd == "cmd_lucky_menu":
+            bot.answer_callback_query(call.id)
+            with ws_lock:
+                conn = ws_conn
+            if not (conn and conn.connected):
+                send_and_auto_delete(user_id, "⚠️ Game connection မရှိ — ဦးစွာ *Start Bot* နှိပ့်ပါ", delay=7)
+            else:
+                with lw_state_lock:
+                    spin = lw_state.get("spins")
+                    gold = lw_state.get("gold") or stats.get("current_balance", 0)
+                text = ("🎡 *Lucky Wheel*\n\n" +
+                        (f"🎰 လုက်ခွင့့်: **{spin:,}**\n" if spin is not None else "🎰 လုက်ခွင့့်: သိရှိရန် *Lucky Balance* နှိပ့်ပါ\n") +
+                        f"🪙 Gold: **{gold:,}**\n\n" +
+                        "လဲလှယ်မည့် ပမာဏရွေးပါ:")
+                max_buy = gold // GOLD_PER_SPIN if gold else 0
+                clean_and_send_menu(user_id, text, get_buy_menu_markup(max_buy))
+        elif cmd == "cmd_lucky_balance":
+            bot.answer_callback_query(call.id)
+            with ws_lock:
+                conn = ws_conn
+            if conn and conn.connected:
+                send_and_auto_delete(user_id, "⏳ စစ်နေပါတယ်...", delay=5)
+                do_get_lucky_spin(conn)
+            else:
+                send_and_auto_delete(user_id, "❌ Game connection မရှိ", delay=7)
+        elif cmd == "cmd_buy_menu":
+            bot.answer_callback_query(call.id)
+            with ws_lock:
+                conn = ws_conn
+            with lw_state_lock:
+                gold = lw_state.get("gold") or stats.get("current_balance", 0)
+            max_buy = gold // GOLD_PER_SPIN if gold else 0
+            if conn and conn.connected:
+                clean_and_send_menu(user_id, f"💱 *လဲလှယ်မည့် ပမာဏ ရွေးပါ*\n🪙 Gold: **{gold:,}**\nအများဆုံး: **{max_buy:,}**", get_buy_menu_markup(max_buy))
+            else:
+                send_and_auto_delete(user_id, "❌ Game connection မရှိ — ဦးစွာ *Start Bot* နှိပ့်ပါ", delay=7)
+        elif cmd == "cmd_back":
+            bot.answer_callback_query(call.id)
+            clean_and_send_menu(user_id)
+        elif cmd.startswith("buy_"):
+            bot.answer_callback_query(call.id)
+            try:
+                amount = int(cmd.split("_", 1)[1])
+            except ValueError:
+                send_and_auto_delete(user_id, "❌ Invalid", delay=5)
+                return
+            if amount <= 0:
+                send_and_auto_delete(user_id, "❌ Amount must be > 0", delay=5)
+                return
+            with ws_lock:
+                conn = ws_conn
+            if not (conn and conn.connected):
+                send_and_auto_delete(user_id, "❌ Game connection မရှိ", delay=7)
+                return
+            result = do_exchange(conn, amount, user_id)
+            send_and_auto_delete(user_id, result, delay=10)
+    except Exception as e:
+        err = str(e)
+        if "query is too old" not in err and "query ID is invalid" not in err:
+            print(f"[CB] callback error: {e}")
 
 def handle_token_input(message):
     global config_data
     user_id = message.chat.id
     token = parse_game_url(message.text.strip())
     if not token:
-        bot.send_message(user_id, "❌ Invalid. Try again.")
+        send_and_auto_delete(user_id, "❌ Invalid. Try again.")
         return
     config_data["game_access_token"] = token
     save_config()
     clean_and_send_menu(user_id, "✅ Token updated!")
+    bot.delete_message(user_id, message.message_id)  
 
 def handle_speed_input(message):
     global config_data
@@ -626,13 +803,14 @@ def handle_speed_input(message):
     try:
         new_speed = int(message.text.strip())
         if new_speed < 1:
-            bot.send_message(user_id, "❌ Speed must be at least 1.")
+            send_and_auto_delete(user_id, "❌ Speed must be at least 1.")
             return
         config_data["speed_multiplier"] = new_speed
         save_config()
         clean_and_send_menu(user_id, f"✅ Speed updated to {new_speed}x!")
+        bot.delete_message(user_id, message.message_id) 
     except ValueError:
-        bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
+        send_and_auto_delete(user_id, "❌ Invalid number. Please enter an integer.")
 
 if __name__ == "__main__":
     print("[STARTUP] Starting Bot Manager Thread...", flush=True)
