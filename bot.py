@@ -392,7 +392,7 @@ def auto_shoot_loop(ws):
                             "msgId": 0
                         })
                 # Extremely tiny sleep to allow network to breathe but keep "hold" feel (Adjusted for stability)
-                time.sleep(0.001)
+                time.sleep(0.00001)
             
             # Minimal delay before next target/angle update
             time.sleep(0.01)
