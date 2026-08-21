@@ -17,14 +17,13 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
-CONFIG_FILE = "farm_config.json"
+CONFIG_FILE = "farm_config_v6.json"
 
-WS_HEADERS = [
-    "User-Agent: Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Origin: https://fishmya.ugame.vn",
-    "Accept-Language: my-MM,my;q=0.9,en-US;q=0.8,en;q=0.7",
-    "X-Requested-With: com.mytel.myid"
-]
+WS_HEADERS = {
+    "User-Agent": "Android SM-S918B",
+    "Origin": "https://fishmya.ugame.vn",
+    "X-Requested-With": "com.mytel.myid"
+}
 
 # ==========================================
 # BOT INITIALIZATION
@@ -117,7 +116,7 @@ def farm_loop(token, chat_id):
     while is_running:
         try:
             ws = websocket.create_connection(
-                f"{WS_URL}?access_token={token}",
+                WS_URL,
                 sslopt={"cert_reqs": ssl.CERT_NONE},
                 header=WS_HEADERS,
                 timeout=30
@@ -131,7 +130,7 @@ def farm_loop(token, chat_id):
             for _ in range(40):
                 m = ws.recv()
                 d = msgpack.unpackb(m, raw=False)
-                if d.get("route") == "mytelLogin" or d.get("msgId") == 1:
+                if d.get("msgId") == 1:
                     login_data = d.get("data", {})
                     break
             
@@ -150,16 +149,23 @@ def farm_loop(token, chat_id):
             
             send_update(chat_id, f"✅ *Farm Started!*\n💰 Current Balance: {balance:,}\n🎯 Target: {config['target']:,}")
             
+            # CRITICAL: Enter room to bypass "Silent Block"
+            ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+            time.sleep(1)
+
             last_msg_claims = 0
+            msg_id_counter = 100
+            
             while is_running:
-                # Burst of 10 claims
-                for _ in range(10):
-                    ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": 0}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+                # Burst of 5 claims
+                for _ in range(5):
+                    ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+                    msg_id_counter += 1
                 
                 # Listen for updates
-                ws.settimeout(3.0)
+                ws.settimeout(2.0)
                 try:
-                    for _ in range(40):
+                    while True:
                         m = ws.recv()
                         d = msgpack.unpackb(m, raw=False)
                         
@@ -176,9 +182,11 @@ def farm_loop(token, chat_id):
                             inner = d.get("data", {})
                             with stats_lock:
                                 stats["last_error"] = inner.get("msg", "Action Failed")
+                except websocket.WebSocketTimeoutException:
+                    pass
                 except: pass
                 
-                # Send update every 10 successful claims and delete old ones
+                # Send update every 10 successful claims
                 with stats_lock:
                     if stats["claims_count"] >= last_msg_claims + 10:
                         last_msg_claims = stats["claims_count"]
@@ -203,7 +211,6 @@ def farm_loop(token, chat_id):
             with stats_lock:
                 stats["last_error"] = str(e)
             time.sleep(5)
-            # Auto-persist: loop will continue if is_running is still True
     
     print("[FARM] Loop ended.")
 
@@ -224,7 +231,7 @@ def cmd_start(message):
     if config["owner_id"] is None:
         config["owner_id"] = message.chat.id
         save_config()
-    bot.send_message(message.chat.id, "💰 *Gold Farm Bot (1500 Exploit)*\nStatus updates every 10 claims.", reply_markup=get_menu(), parse_mode="Markdown")
+    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Room Bypass)*\nExploit: claimItemOnline in room.", reply_markup=get_menu(), parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
@@ -269,7 +276,6 @@ def handle_query(call):
 def process_token(message):
     token = parse_token(message.text)
     chat_id = message.chat.id
-    # Delete the token message for privacy
     try:
         bot.delete_message(chat_id, message.message_id)
     except: pass
@@ -284,7 +290,7 @@ def process_token(message):
         delete_msg_after(chat_id, msg.message_id, 3)
 
 if __name__ == "__main__":
-    print("[STARTUP] Bot is running...")
+    print("[STARTUP] Bot V6 is running...")
     while True:
         try:
             bot.infinity_polling(timeout=60)
