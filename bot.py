@@ -31,8 +31,6 @@ WS_HEADERS = [
 # ==========================================
 if not TELEGRAM_BOT_TOKEN:
     print("[CRITICAL] TELEGRAM_BOT_TOKEN environment variable is missing!")
-    # For testing, you can hardcode it here, but it's safer to use env var
-    # TELEGRAM_BOT_TOKEN = "8924460807:AAGAKeOxzz-CaJNVNzYE7nQg5VnM7uk4vuw"
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -49,12 +47,14 @@ config = {"owner_id": None, "token": None, "target": 150000000}
 is_running = False
 ws_conn = None
 farm_thread = None
+last_update_msg_id = None
 
 stats = {
     "total_gained": 0,
     "claims_count": 0,
     "current_balance": 0,
-    "start_balance": 0
+    "start_balance": 0,
+    "last_error": "None"
 }
 stats_lock = threading.Lock()
 
@@ -83,11 +83,29 @@ def parse_token(text):
         except: return None
     return text if text.startswith("eyJ") else None
 
-def send_update(chat_id, text):
+def send_update(chat_id, text, auto_delete=False):
+    global last_update_msg_id
     try:
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        if auto_delete and last_update_msg_id:
+            try:
+                bot.delete_message(chat_id, last_update_msg_id)
+            except: pass
+        
+        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
+        if auto_delete:
+            last_update_msg_id = msg.message_id
+        return msg.message_id
     except Exception as e:
         print(f"[TG] Failed to send update: {e}")
+        return None
+
+def delete_msg_after(chat_id, msg_id, delay=5):
+    def run():
+        time.sleep(delay)
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except: pass
+    threading.Thread(target=run, daemon=True).start()
 
 # ==========================================
 # CORE FARMING LOGIC
@@ -110,15 +128,16 @@ def farm_loop(token, chat_id):
             ws.send(msgpack.packb({"route": "mytelLogin", "data": {"accessToken": token, "language": "my"}, "msgId": 1}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             
             login_data = None
-            for _ in range(20):
+            for _ in range(40):
                 m = ws.recv()
                 d = msgpack.unpackb(m, raw=False)
-                if d.get("msgId") == 1 or d.get("route") == "mytelLogin":
+                if d.get("route") == "mytelLogin" or d.get("msgId") == 1:
                     login_data = d.get("data", {})
                     break
             
             if not login_data or not login_data.get("ok"):
-                send_update(chat_id, "❌ Login failed. Check token.")
+                err_msg = login_data.get("msg", "Unknown Login Error") if login_data else "No Response"
+                send_update(chat_id, f"❌ *Login Failed*\nReason: {err_msg}")
                 is_running = False
                 break
             
@@ -129,7 +148,7 @@ def farm_loop(token, chat_id):
                 stats["total_gained"] = 0
                 stats["claims_count"] = 0
             
-            send_update(chat_id, f"✅ *Farm Started!*\n💰 Start Balance: {balance:,}\n🎯 Target: {config['target']:,}")
+            send_update(chat_id, f"✅ *Farm Started!*\n💰 Current Balance: {balance:,}\n🎯 Target: {config['target']:,}")
             
             last_msg_claims = 0
             while is_running:
@@ -138,20 +157,28 @@ def farm_loop(token, chat_id):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": 0}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                 
                 # Listen for updates
-                ws.settimeout(2.0)
+                ws.settimeout(3.0)
                 try:
-                    for _ in range(20):
+                    for _ in range(40):
                         m = ws.recv()
                         d = msgpack.unpackb(m, raw=False)
-                        if d.get("route") == "reloadCash" and d.get("data", {}).get("reason") == "claimItemOnline":
+                        
+                        if d.get("route") == "reloadCash":
                             inner = d.get("data", {})
                             with stats_lock:
-                                stats["total_gained"] += inner.get("changeCash", 0)
-                                stats["current_balance"] = inner.get("newCash", balance)
-                                stats["claims_count"] += 1
+                                change = inner.get("changeCash", 0)
+                                if change > 0:
+                                    stats["total_gained"] += change
+                                    stats["current_balance"] = inner.get("newCash", stats["current_balance"])
+                                    stats["claims_count"] += 1
+                        
+                        elif d.get("data", {}).get("ok") == False:
+                            inner = d.get("data", {})
+                            with stats_lock:
+                                stats["last_error"] = inner.get("msg", "Action Failed")
                 except: pass
                 
-                # Send update every 10 successful claims
+                # Send update every 10 successful claims and delete old ones
                 with stats_lock:
                     if stats["claims_count"] >= last_msg_claims + 10:
                         last_msg_claims = stats["claims_count"]
@@ -161,7 +188,7 @@ def farm_loop(token, chat_id):
                             f"Gained: +{stats['total_gained']:,}\n"
                             f"Balance: {stats['current_balance']:,}"
                         )
-                        send_update(chat_id, msg)
+                        send_update(chat_id, msg, auto_delete=True)
                         
                         if stats["current_balance"] >= config["target"]:
                             send_update(chat_id, f"🎉 *Target Reached!*\nFinal Balance: {stats['current_balance']:,}")
@@ -172,8 +199,11 @@ def farm_loop(token, chat_id):
             
             ws.close()
         except Exception as e:
-            print(f"[FARM] Error: {e}")
+            print(f"[FARM] Error: {e}. Reconnecting in 5s...")
+            with stats_lock:
+                stats["last_error"] = str(e)
             time.sleep(5)
+            # Auto-persist: loop will continue if is_running is still True
     
     print("[FARM] Loop ended.")
 
@@ -229,19 +259,29 @@ def handle_query(call):
                 f"State: {status}\n"
                 f"Claims: {stats['claims_count']}\n"
                 f"Gained: {stats['total_gained']:,}\n"
-                f"Balance: {stats['current_balance']:,}"
+                f"Balance: {stats['current_balance']:,}\n"
+                f"Last Error: {stats['last_error']}"
             )
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
+        delete_msg_after(chat_id, msg.message_id, 10)
         bot.answer_callback_query(call.id)
 
 def process_token(message):
     token = parse_token(message.text)
+    chat_id = message.chat.id
+    # Delete the token message for privacy
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except: pass
+    
     if token:
         config["token"] = token
         save_config()
-        bot.send_message(message.chat.id, "✅ Token updated!")
+        msg = bot.send_message(chat_id, "✅ Token updated!")
+        delete_msg_after(chat_id, msg.message_id, 3)
     else:
-        bot.send_message(message.chat.id, "❌ Invalid token.")
+        msg = bot.send_message(chat_id, "❌ Invalid token.")
+        delete_msg_after(chat_id, msg.message_id, 3)
 
 if __name__ == "__main__":
     print("[STARTUP] Bot is running...")
