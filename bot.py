@@ -18,7 +18,6 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# GitHub Secret မှ Token ကို လုံခြုံစွာ ခေါ်ယူခြင်း
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
 if not TELEGRAM_BOT_TOKEN:
@@ -46,7 +45,7 @@ except Exception as e:
 # ==========================================
 # STATE
 # ==========================================
-config_data = {"owner_id": None, "game_access_token": None, "auto_restart": True, "speed_multiplier": 200}
+config_data = {"owner_id": None, "game_access_token": None, "auto_restart": True, "speed_multiplier": 200, "farm_enabled": True}
 is_running = False
 ws_conn = None
 ws_lock = threading.Lock()
@@ -60,6 +59,7 @@ last_menu_message_id = None
 heartbeat_alive = False
 shoot_alive = False
 use_4x_alive = False
+farm_alive = False
 in_game = False
 login_handled = False
 play_handled = False
@@ -71,6 +71,7 @@ stats = {
     "requests_sent": 0,
     "coins_spent": 0,
     "coins_gained": 0,
+    "farm_gained": 0,
     "fish_killed": 0,
     "start_balance": 0,
     "current_balance": 0
@@ -83,15 +84,17 @@ def reset_session_stats():
         stats["requests_sent"] = 0
         stats["coins_spent"] = 0
         stats["coins_gained"] = 0
+        stats["farm_gained"] = 0
         stats["fish_killed"] = 0
 
 def log_stats():
     with stats_lock:
-        profit = stats["coins_gained"] - stats["coins_spent"]
+        profit = stats["coins_gained"] + stats["farm_gained"] - stats["coins_spent"]
         print(f"\n--- SESSION STATISTICS ---", flush=True)
         print(f"Requests Sent: {stats['requests_sent']}", flush=True)
         print(f"Coins Spent: {stats['coins_spent']:,}", flush=True)
-        print(f"Coins Gained: {stats['coins_gained']:,}", flush=True)
+        print(f"Game Gained: {stats['coins_gained']:,}", flush=True)
+        print(f"Farm Gained: {stats['farm_gained']:,}", flush=True)
         print(f"Net Profit: {profit:,}", flush=True)
         print(f"Fish Killed: {stats['fish_killed']}", flush=True)
         print(f"Current Balance: {stats['current_balance']:,}", flush=True)
@@ -107,7 +110,7 @@ cycle_pause = 5
 # ERROR MONITORING
 # ==========================================
 error_count = 0
-max_errors = 1 # Restart immediately on any error
+max_errors = 1 
 last_error_msg = "None"
 restart_lock = threading.Lock()
 is_restarting = False
@@ -115,13 +118,12 @@ is_restarting = False
 # ==========================================
 # OPTIMIZED GAME LOGIC VARIABLES - ULTRA SPEED
 # ==========================================
-SPEED_MULTIPLIER = 200 # GG Method: 200x Burst Speed
-bullet_speed = 1400   # Constant bullet speed from analyzed logic
-fish_list = {}        # Store fish data for targeting
+SPEED_MULTIPLIER = 200 
+bullet_speed = 1400   
+fish_list = {}        
 fish_lock = threading.Lock()
-last_server_time = 0  # Track server timestamp for date sync
+last_server_time = 0  
 
-# Dragging State for Hold & Drag Angle Simulation
 current_angle_deg = 0.0
 drag_direction = 1
 
@@ -130,7 +132,8 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                config_data = json.load(f)
+                loaded = json.load(f)
+                config_data.update(loaded)
         except: pass
 
 def save_config():
@@ -161,9 +164,7 @@ def send_ws(ws, payload_dict):
             ws.send(msgpack.packb(payload_dict, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             with stats_lock:
                 stats["requests_sent"] += 1
-                # Track coin spending on shoot
                 if payload_dict.get("route") == "shoot":
-                    # Assume bullet type 1 costs 1 coin, change if needed
                     stats["coins_spent"] += 6
             return True
         except Exception as e:
@@ -178,12 +179,14 @@ def send_ws(ws, payload_dict):
 # ==========================================
 def get_main_menu_markup():
     markup = InlineKeyboardMarkup(row_width=2)
+    farm_status = "✅ Farm: ON" if config_data.get("farm_enabled", True) else "❌ Farm: OFF"
     markup.add(
         InlineKeyboardButton("▶️ Start Bot", callback_data="cmd_start"),
         InlineKeyboardButton("🛑 Stop Bot", callback_data="cmd_stop"),
         InlineKeyboardButton("🔑 Set Token", callback_data="cmd_token"),
         InlineKeyboardButton("📊 Status", callback_data="cmd_status"),
         InlineKeyboardButton("⚡ Set Speed", callback_data="cmd_speed"),
+        InlineKeyboardButton(farm_status, callback_data="cmd_toggle_farm"),
         InlineKeyboardButton("🔧 Force Restart", callback_data="cmd_force_restart")
     )
     return markup
@@ -200,7 +203,7 @@ def clean_and_send_menu(chat_id, text=None):
             except: pass
 
     if not text:
-        text = "🤖 *Fish Bot HYPER SPEED (2X)*\n⚡ Shoot: Held Down\n🐟 Targets: 2 fish\n🔫 Bullet Speed: 1400\n\nSelect action:"
+        text = "🤖 *Fish Bot + GOLD FARM*\n⚡ Shoot: 200x Burst\n💰 Farm: +1500 Gold/sec\n\nSelect action:"
     try:
         msg = bot.send_message(chat_id, text, reply_markup=get_main_menu_markup(), parse_mode="Markdown")
         last_menu_message_id = msg.message_id
@@ -223,10 +226,11 @@ def track_and_send(chat_id, text, markup=None):
             return None
 
 def stop_all_threads():
-    global heartbeat_alive, shoot_alive, use_4x_alive, login_handled, play_handled, in_game
+    global heartbeat_alive, shoot_alive, use_4x_alive, farm_alive, login_handled, play_handled, in_game
     heartbeat_alive = False
     shoot_alive = False
     use_4x_alive = False
+    farm_alive = False
     login_handled = False
     play_handled = False
     in_game = False
@@ -249,8 +253,6 @@ def force_restart():
     
     stop_all_threads()
     time.sleep(1)
-    
-    # Re-trigger connection in manager loop
     is_restarting = False
 
 # ==========================================
@@ -336,7 +338,7 @@ def ws_recv_loop(ws):
         except: break
 
 # ==========================================
-# GAME LOOPS (RESTORED TO HOLD & SHOOT)
+# GAME LOOPS
 # ==========================================
 def heartbeat_loop(ws):
     global heartbeat_alive
@@ -345,6 +347,18 @@ def heartbeat_loop(ws):
         send_ws(ws, {"route": "ping", "data": {}, "msgId": 0})
         time.sleep(2)
     heartbeat_alive = False
+
+def gold_harvest_loop(ws):
+    """Integrated Gold Farm Exploit: +1500 gold/sec."""
+    global farm_alive
+    farm_alive = True
+    print("[GAME] Gold Harvest Exploit Active.")
+    while is_running and farm_alive and ws.connected and not is_restarting:
+        if config_data.get("farm_enabled", True):
+            # package 5 = 1500 gold
+            send_ws(ws, {"route": "claimItemOnline", "data": {"package": 5}, "msgId": 0})
+        time.sleep(0.3) # Optimized interval for sustainability
+    farm_alive = False
 
 def auto_shoot_loop(ws):
     global shoot_alive, current_angle_deg, drag_direction
@@ -358,7 +372,6 @@ def auto_shoot_loop(ws):
                 current_fish_ids = list(fish_list.keys()) 
                 if current_fish_ids: target_ids = current_fish_ids[:2]
             
-            # Angle logic
             current_angle_deg += drag_direction * 0.05
             if current_angle_deg >= 60.0:
                 current_angle_deg = 60.0
@@ -368,12 +381,7 @@ def auto_shoot_loop(ws):
                 drag_direction = 1
             
             angle_rad = math.radians(current_angle_deg)
-            
-            # GG METHOD: Continuous "Hold" Shooting
-            # Instead of one big burst, we send in a tight loop to simulate holding down
             multiplier = int(config_data.get("speed_multiplier", 200))
-            
-            # We send packets in smaller batches with almost no delay to create a "held" stream effect
             batch_size = 10
             num_batches = max(1, multiplier // batch_size)
             
@@ -391,24 +399,18 @@ def auto_shoot_loop(ws):
                             "data": {"btype": 4, "skillType": 0, "fIds": target_ids, "bulletSpeed": bullet_speed},
                             "msgId": 0
                         })
-                # Extremely tiny sleep to allow network to breathe but keep "hold" feel (Adjusted for stability)
                 time.sleep(0.00001)
-            
-            # Minimal delay before next target/angle update
             time.sleep(0.01)
-            
         except Exception as e:
             print(f"[GG-SPEED] Loop Error: {e}")
             break
-            
     shoot_alive = False
 
 def use_4x_loop(ws):
     global use_4x_alive
     use_4x_alive = True
-    print("[GAME] 4x Fast Shoot Loop started (Every 10s).")
+    print("[GAME] 4x Fast Shoot Loop started.")
     while is_running and use_4x_alive and ws.connected and not is_restarting:
-        # type: 6 is FastShootX4, sending every 10 seconds
         send_ws(ws, {"route": "useItem", "data": {"type": 6}, "msgId": 0})
         time.sleep(10)
     use_4x_alive = False
@@ -444,7 +446,6 @@ def handle_message(data, ws):
             f_id = inner.get("id")
             with fish_lock:
                 if f_id in fish_list: del fish_list[f_id]
-            # Track kills and gains
             if inner.get("playerId") == game_creds.get("username"):
                 with stats_lock:
                     stats["fish_killed"] += 1
@@ -454,6 +455,13 @@ def handle_message(data, ws):
             if inner.get("playerId") == game_creds.get("username"):
                 with stats_lock:
                     stats["current_balance"] = inner.get("cash", 0)
+        
+        elif route == "reloadCash":
+            # Harvest gain reporting
+            if inner.get("reason") == "claimItemOnline":
+                with stats_lock:
+                    stats["farm_gained"] += inner.get("changeCash", 0)
+                    stats["current_balance"] = inner.get("newCash", 0)
 
         if msg_id == 1: # Login
             if inner.get("ok"):
@@ -466,6 +474,7 @@ def handle_message(data, ws):
                 if config_data["owner_id"]:
                     clean_and_send_menu(config_data["owner_id"], f"✅ *Login OK!*\n👤 {inner.get('nickname', 'User')}\n💰 Balance: {inner.get('cash', 0):,}\n\n⚡ Entering room...")
                 if not heartbeat_alive: threading.Thread(target=heartbeat_loop, args=(ws,), daemon=True).start()
+                if not farm_alive: threading.Thread(target=gold_harvest_loop, args=(ws,), daemon=True).start()
                 time.sleep(0.5)
                 send_ws(ws, {"route": "play", "data": {"playerId": game_creds["username"], "password": game_creds["password"], "index": 0}, "msgId": 2})
         elif msg_id == 2: # Play
@@ -481,11 +490,7 @@ def start_game_actions(ws):
     global in_game
     if not is_running or is_restarting: return
     in_game = True
-    
-    # [MODIFIED] AUTO 1 click (type 4 = AUTO)
-    print("[GAME] Activating AUTO once...")
     send_ws(ws, {"route": "useItem", "data": {"type": 4}, "msgId": 0})
-    
     send_ws(ws, {"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": bullet_speed}, "msgId": 0})
     if not shoot_alive: threading.Thread(target=auto_shoot_loop, args=(ws,), daemon=True).start()
     if not use_4x_alive: threading.Thread(target=use_4x_loop, args=(ws,), daemon=True).start()
@@ -509,24 +514,16 @@ def handle_speed_cmd(message):
     global config_data
     user_id = message.chat.id
     if config_data["owner_id"] != user_id: return
-    
     try:
         args = message.text.split()
         if len(args) < 2:
-            bot.send_message(user_id, "ℹ️ Usage: `/speed <value>`\nExample: `/speed 500`", parse_mode="Markdown")
+            bot.send_message(user_id, "ℹ️ Usage: `/speed <value>`", parse_mode="Markdown")
             return
-            
         new_speed = int(args[1])
-        if new_speed < 1:
-            bot.send_message(user_id, "❌ Speed must be at least 1.")
-            return
-            
         config_data["speed_multiplier"] = new_speed
         save_config()
         bot.send_message(user_id, f"⚡ *Speed updated to {new_speed}x!*", parse_mode="Markdown")
-        print(f"[CONFIG] Speed updated to {new_speed}x by user.")
-    except ValueError:
-        bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
+    except: pass
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -554,29 +551,32 @@ def handle_callback(call):
         bot.answer_callback_query(call.id)
     elif cmd == "cmd_speed":
         current_speed = config_data.get("speed_multiplier", 200)
-        msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value (e.g., 500, 1000):", parse_mode="Markdown")
+        msg = bot.send_message(user_id, f"⚡ *Current Speed: {current_speed}x*\n\nSend new speed value:", parse_mode="Markdown")
         bot.register_next_step_handler(msg, handle_speed_input)
         bot.answer_callback_query(call.id)
+    elif cmd == "cmd_toggle_farm":
+        config_data["farm_enabled"] = not config_data.get("farm_enabled", True)
+        save_config()
+        bot.answer_callback_query(call.id, f"💰 Farm {'ON' if config_data['farm_enabled'] else 'OFF'}")
+        clean_and_send_menu(user_id)
     elif cmd == "cmd_status":
         status = "🟢 Running" if is_running else "🔴 Stopped"
         shoot = "🔥 Active" if shoot_alive else "💤 Idle"
-        multiplier = config_data.get("speed_multiplier", 200)
+        farm = "✅ Active" if farm_alive and config_data.get("farm_enabled", True) else "❌ Off"
         with stats_lock:
-            profit = stats["coins_gained"] - stats["coins_spent"]
+            profit = stats["coins_gained"] + stats["farm_gained"] - stats["coins_spent"]
             stat_text = (
                 f"📊 *Bot Status*\n"
                 f"Status: {status}\n"
                 f"Shooting: {shoot}\n"
-                f"Speed: {multiplier}x\n"
+                f"Gold Farm: {farm}\n"
                 f"--------------------------\n"
-                f"📡 Requests: {stats['requests_sent']}\n"
                 f"💸 Spent: {stats['coins_spent']:,}\n"
-                f"💰 Gained: {stats['coins_gained']:,}\n"
-                f"📈 Profit: {profit:,}\n"
-                f"🐟 Kills: {stats['fish_killed']}\n"
+                f"🎮 Game Gain: {stats['coins_gained']:,}\n"
+                f"💰 Farm Gain: {stats['farm_gained']:,}\n"
+                f"📈 Total Profit: {profit:,}\n"
                 f"🏦 Balance: {stats['current_balance']:,}\n"
                 f"--------------------------\n"
-                f"Cycle: {cycle_duration}s run / {cycle_pause}s pause"
             )
         clean_and_send_menu(user_id, stat_text)
         bot.answer_callback_query(call.id)
@@ -597,14 +597,10 @@ def handle_speed_input(message):
     user_id = message.chat.id
     try:
         new_speed = int(message.text.strip())
-        if new_speed < 1:
-            bot.send_message(user_id, "❌ Speed must be at least 1.")
-            return
         config_data["speed_multiplier"] = new_speed
         save_config()
         clean_and_send_menu(user_id, f"✅ Speed updated to {new_speed}x!")
-    except ValueError:
-        bot.send_message(user_id, "❌ Invalid number. Please enter an integer.")
+    except: pass
 
 if __name__ == "__main__":
     print("[STARTUP] Starting Bot Manager Thread...", flush=True)
@@ -613,9 +609,7 @@ if __name__ == "__main__":
     if config_data.get("game_access_token"):
         print("[STARTUP] Found access token, setting is_running = True", flush=True)
         is_running = True
-    else:
-        print("[STARTUP] No access token found. Bot will wait for command.", flush=True)
-        
+    
     print("[STARTUP] Starting Telegram Polling...", flush=True)
     try:
         bot.infinity_polling(timeout=20, long_polling_timeout=10)
