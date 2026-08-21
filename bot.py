@@ -29,21 +29,18 @@ WS_HEADERS = [
 # ==========================================
 # BOT INITIALIZATION
 # ==========================================
-telebot.apihelper.CONNECT_TIMEOUT = 60
-telebot.apihelper.READ_TIMEOUT = 60
+if not TELEGRAM_BOT_TOKEN:
+    print("[CRITICAL] TELEGRAM_BOT_TOKEN environment variable is missing!")
+    # For testing, you can hardcode it here, but it's safer to use env var
+    # TELEGRAM_BOT_TOKEN = "8924460807:AAGAKeOxzz-CaJNVNzYE7nQg5VnM7uk4vuw"
 
-bot = None
-def init_bot():
-    global bot
-    if not TELEGRAM_BOT_TOKEN:
-        print("[CRITICAL] TELEGRAM_BOT_TOKEN missing!")
-        return False
-    try:
-        bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
-        return True
-    except Exception as e:
-        print(f"[ERROR] Bot init failed: {e}")
-        return False
+try:
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    telebot.apihelper.CONNECT_TIMEOUT = 60
+    telebot.apihelper.READ_TIMEOUT = 60
+except Exception as e:
+    print(f"[CRITICAL] Failed to initialize bot: {e}")
+    sys.exit(1)
 
 # ==========================================
 # STATE
@@ -87,7 +84,6 @@ def parse_token(text):
     return text if text.startswith("eyJ") else None
 
 def send_update(chat_id, text):
-    if not bot: return
     try:
         bot.send_message(chat_id, text, parse_mode="Markdown")
     except Exception as e:
@@ -248,10 +244,10 @@ def process_token(message):
         bot.send_message(message.chat.id, "❌ Invalid token.")
 
 if __name__ == "__main__":
-    if init_bot():
-        print("[STARTUP] Bot is running...")
-        while True:
-            try:
-                bot.infinity_polling(timeout=60)
-            except:
-                time.sleep(5)
+    print("[STARTUP] Bot is running...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=60)
+        except Exception as e:
+            print(f"[POLLING] Error: {e}")
+            time.sleep(5)
