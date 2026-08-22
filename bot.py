@@ -1,4 +1,4 @@
-Import websocket
+import websocket
 import msgpack
 import json
 import time
@@ -42,7 +42,7 @@ except Exception as e:
 # ==========================================
 # STATE
 # ==========================================
-config = {"owner_id": None, "token": None, "target": 150000000000000}
+config = {"owner_id": None, "token": None, "target": 150000000}
 is_running = False
 ws_conn = None
 farm_thread = None
@@ -134,12 +134,11 @@ def farm_loop(token, chat_id):
                     login_data = d.get("data", {})
                     break
             
-            # ၁။ Login Failed ဖြစ်ရင် ရပ်မသွားဘဲ Auto ပြန်စအောင် ပြင်ထားခြင်း
             if not login_data or not login_data.get("ok"):
                 err_msg = login_data.get("msg", "Unknown Login Error") if login_data else "No Response"
                 send_update(chat_id, f"❌ *Login Failed*\nReason: {err_msg}\n🔄 စက္ကန့် ၃၀ အကြာတွင် Auto ပြန်စပါမည်...", auto_delete=True)
-                time.sleep(30) # ခဏနားပြီး
-                continue # အစကနေ Auto ပြန်ချိတ်ပါမယ်
+                time.sleep(30)
+                continue
             
             balance = login_data.get("cash", 0)
             with stats_lock:
@@ -150,23 +149,19 @@ def farm_loop(token, chat_id):
             
             send_update(chat_id, f"✅ *Farm Started!*\n💰 Current Balance: {balance:,}\n🎯 Target: {config['target']:,}")
             
-            # CRITICAL: Enter room to bypass "Silent Block"
             ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             time.sleep(1)
 
             last_msg_claims = 0
             msg_id_counter = 100
             
-            # ၃။ Gold မတက်တာကို စစ်ဆေးရန် အချိန်မှတ်ထားခြင်း
             last_gold_time = time.time()
             
             while is_running:
-                # Burst of 5 claims
-                for _ in range(5):
+                for _ in range(50):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
-                # Listen for updates
                 ws.settimeout(2.0)
                 try:
                     while True:
@@ -181,7 +176,6 @@ def farm_loop(token, chat_id):
                                     stats["total_gained"] += change
                                     stats["current_balance"] = inner.get("newCash", stats["current_balance"])
                                     stats["claims_count"] += 1
-                                    # Gold တက်ရင် အချိန်ကို အသစ်ပြန်မှတ်ပါမယ်
                                     last_gold_time = time.time()
                         
                         elif d.get("data", {}).get("ok") == False:
@@ -192,12 +186,10 @@ def farm_loop(token, chat_id):
                     pass
                 except: pass
                 
-                # ၃။ စက္ကန့် ၃၀ အတွင်း Gold လုံးဝ မတက်ရင် Loop ကိုဖြတ်ပြီး Auto အစကနေ ပြန်စပါမယ်
                 if time.time() - last_gold_time > 30:
                     send_update(chat_id, "⚠️ *Gold ရပ်နေပါသည်*\n🔄 Auto အစကနေ ပြန်စနေပါသည်...", auto_delete=True)
                     break
                 
-                # Send update every 10 successful claims
                 with stats_lock:
                     if stats["claims_count"] >= last_msg_claims + 10:
                         last_msg_claims = stats["claims_count"]
@@ -214,10 +206,9 @@ def farm_loop(token, chat_id):
                             is_running = False
                             break
                 
-                time.sleep(0.5)
+                time.sleep(0.001)
             
             ws.close()
-        # ၂။ Error တစ်ခုခုဖြစ်ရင် (Network ကျတာမျိုး) ၅ စက္ကန့်နေရင် Auto ပြန်ချိတ်ပါမယ်
         except Exception as e:
             print(f"[FARM] Error: {e}. Reconnecting in 5s...")
             with stats_lock:
@@ -244,6 +235,38 @@ def cmd_start(message):
         config["owner_id"] = message.chat.id
         save_config()
     bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Room Bypass)*\nExploit: claimItemOnline in room.", reply_markup=get_menu(), parse_mode="Markdown")
+
+@bot.message_handler(commands=['target'])
+def cmd_target(message):
+    global config
+    chat_id = message.chat.id
+    if config["owner_id"] != chat_id: return
+    
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            msg = bot.send_message(chat_id, "ℹ️ *အသုံးပြုနည်း:*\n`/target <ပမာဏ>`\nဥပမာ: `/target 300000000`", parse_mode="Markdown")
+            delete_msg_after(chat_id, msg.message_id, 10)
+            return
+            
+        new_target = int(args[1].replace(",", "").replace(".", ""))
+        if new_target <= 0:
+            msg = bot.send_message(chat_id, "❌ ပမာဏသည် 0 ထက် ကြီးရပါမည်။")
+            delete_msg_after(chat_id, msg.message_id, 5)
+            return
+            
+        config["target"] = new_target
+        save_config()
+        msg = bot.send_message(chat_id, f"🎯 *Target ကို {new_target:,} သို့ ပြောင်းလဲသတ်မှတ်လိုက်ပါပြီ!*", parse_mode="Markdown")
+        delete_msg_after(chat_id, msg.message_id, 10)
+        
+        try:
+            bot.delete_message(chat_id, message.message_id) 
+        except: pass
+        
+    except ValueError:
+        msg = bot.send_message(chat_id, "❌ ဂဏန်းမှားယွင်းနေပါသည်။")
+        delete_msg_after(chat_id, msg.message_id, 5)
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
@@ -276,13 +299,14 @@ def handle_query(call):
             text = (
                 f"📊 *Farm Status*\n"
                 f"State: {status}\n"
+                f"🎯 Target: {config['target']:,}\n"
                 f"Claims: {stats['claims_count']}\n"
                 f"Gained: {stats['total_gained']:,}\n"
                 f"Balance: {stats['current_balance']:,}\n"
                 f"Last Error: {stats['last_error']}"
             )
         msg = bot.send_message(chat_id, text, parse_mode="Markdown")
-        delete_msg_after(chat_id, msg.message_id, 10)
+        delete_msg_after(chat_id, msg.message_id, 15)
         bot.answer_callback_query(call.id)
 
 def process_token(message):
