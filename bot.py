@@ -17,7 +17,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
-CONFIG_FILE = "farm_config_v10.json"
+CONFIG_FILE = "farm_config_v11.json"
 
 WS_HEADERS = {
     "User-Agent": "Android SM-S918B",
@@ -42,8 +42,7 @@ except Exception as e:
 config = {
     "owner_id": None, 
     "token": None, 
-    "target_gain": 150000000,
-    "workers": 1 # Default to 1 as requested
+    "target_gain": 150000000
 }
 is_running = False
 last_update_msg_id = None
@@ -54,8 +53,7 @@ stats = {
     "current_balance": 0,
     "start_balance": 0,
     "last_error": "None",
-    "active_workers": 0,
-    "speed_rpm": 0 # Rewards Per Minute
+    "speed_rpm": 0
 }
 stats_lock = threading.Lock()
 
@@ -88,13 +86,11 @@ def send_update(chat_id, text, auto_delete=False):
     global last_update_msg_id
     try:
         if auto_delete and last_update_msg_id:
-            try:
-                bot.delete_message(chat_id, last_update_msg_id)
+            try: bot.delete_message(chat_id, last_update_msg_id)
             except: pass
         
         msg = bot.send_message(chat_id, text, parse_mode="Markdown")
-        if auto_delete:
-            last_update_msg_id = msg.message_id
+        if auto_delete: last_update_msg_id = msg.message_id
         return msg.message_id
     except: return None
 
@@ -106,39 +102,38 @@ def delete_msg_after(chat_id, msg_id, delay=5):
     threading.Thread(target=run, daemon=True).start()
 
 # ==========================================
-# ULTRA TURBO WORKER (Optimized for Single Connection)
+# V11 ULTRA-TURBO WORKER (Based on User Login Logic)
 # ==========================================
-def worker_loop(token, chat_id, worker_id):
+def worker_loop(token, chat_id):
     global is_running, stats
     
-    print(f"[WORKER-{worker_id}] Ultra-Turbo Started.")
-    with stats_lock:
-        stats["active_workers"] += 1
-        
+    print(f"[V11] Ultra-Turbo Started.")
+    
     while is_running:
         try:
             ws = websocket.create_connection(
                 WS_URL,
                 sslopt={"cert_reqs": ssl.CERT_NONE},
                 header=WS_HEADERS,
-                timeout=15
+                timeout=20
             )
             
-            # Login
+            # Login (Using msgId: 1 like user script)
             ws.send(msgpack.packb({"route": "mytelLogin", "data": {"accessToken": token, "language": "my"}, "msgId": 1}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             
             login_data = None
-            for _ in range(20):
+            for _ in range(40):
                 m = ws.recv()
                 if isinstance(m, str): continue
                 d = msgpack.unpackb(m, raw=False)
-                if d.get("route") == "mytelLogin":
+                # Check msgId == 1 as per user's working script
+                if d.get("msgId") == 1:
                     login_data = d.get("data", {})
                     break
             
             if not login_data or not login_data.get("ok"):
-                print(f"[WORKER-{worker_id}] Login Failed.")
-                time.sleep(5)
+                print(f"[V11] Login Failed.")
+                time.sleep(10)
                 continue
             
             with stats_lock:
@@ -146,23 +141,23 @@ def worker_loop(token, chat_id, worker_id):
                     stats["start_balance"] = login_data.get("cash", 0)
                 stats["current_balance"] = login_data.get("cash", 0)
             
-            # Room Bypass
+            # Room Bypass (User logic)
             ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             time.sleep(0.5)
 
-            msg_id_counter = 5000
+            msg_id_counter = 1000
             last_gold_time = time.time()
             
             while is_running:
-                # ULTRA BURST: Send 50 claims rapidly
+                # ULTRA BURST: Send 50 claims at once for speed
                 for _ in range(50):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
-                # Rapid Response Processing
+                # Fast Response Processing
                 ws.settimeout(0.5)
                 try:
-                    for _ in range(60): # Process more messages per loop
+                    for _ in range(60):
                         m = ws.recv()
                         if isinstance(m, str): continue
                         d = msgpack.unpackb(m, raw=False)
@@ -191,27 +186,23 @@ def worker_loop(token, chat_id, worker_id):
                         is_running = False
                         break
                 
-                # Watchdog: Reconnect if no gold for 25s
-                if time.time() - last_gold_time > 25:
+                # Watchdog: Reconnect if stalled
+                if time.time() - last_gold_time > 30:
+                    print("[V11] Stalled. Reconnecting...")
                     break
                 
-                # No sleep or very minimal sleep for max speed
                 time.sleep(0.01)
             
             ws.close()
         except Exception as e:
-            print(f"[WORKER-{worker_id}] Error: {e}")
-            time.sleep(3)
-            
-    with stats_lock:
-        stats["active_workers"] -= 1
+            print(f"[V11] Error: {e}")
+            time.sleep(5)
 
 # ==========================================
 # MONITOR
 # ==========================================
 def monitor_loop(chat_id):
     global is_running, stats
-    last_gained = 0
     start_time = time.time()
     
     while is_running:
@@ -223,10 +214,10 @@ def monitor_loop(chat_id):
                 stats["speed_rpm"] = int(current_gained / elapsed)
             
             status_text = (
-                f"⚡️ *Turbo V10 (Single Connection)*\n"
+                f"🚀 *Turbo V11 (Verified Login)*\n"
                 f"📈 Gained: +{current_gained:,}\n"
                 f"💰 Balance: {stats['current_balance']:,}\n"
-                f"🚀 Speed: ~{stats['speed_rpm']:,} gold/min\n"
+                f"⚡️ Speed: ~{stats['speed_rpm']:,} gold/min\n"
                 f"🎯 Target: {config['target_gain']:,}"
             )
             send_update(chat_id, status_text, auto_delete=True)
@@ -240,7 +231,7 @@ def monitor_loop(chat_id):
 # ==========================================
 def get_menu():
     markup = InlineKeyboardMarkup()
-    btn = "🛑 Stop Bot" if is_running else "⚡️ Start Ultra-Turbo"
+    btn = "🛑 Stop Bot" if is_running else "⚡️ Start V11 Turbo"
     markup.add(InlineKeyboardButton(btn, callback_data="toggle"))
     markup.add(InlineKeyboardButton("🔑 Set Token", callback_data="set_token"))
     markup.add(InlineKeyboardButton("🎯 Set Target", callback_data="set_target"))
@@ -252,7 +243,7 @@ def cmd_start(message):
     global config
     config["owner_id"] = message.chat.id
     save_config()
-    bot.send_message(message.chat.id, "🔥 *Fish Hunter Turbo V10*\nOptimized for Single-Connection Speed.", reply_markup=get_menu(), parse_mode="Markdown")
+    bot.send_message(message.chat.id, "🔥 *Fish Hunter Turbo V11*\nVerified Login + Ultra Speed.", reply_markup=get_menu(), parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
@@ -274,9 +265,9 @@ def handle_query(call):
                     if isinstance(stats[k], (int, float)): stats[k] = 0
                 stats["last_error"] = "None"
             
-            threading.Thread(target=worker_loop, args=(config["token"], chat_id, 1), daemon=True).start()
+            threading.Thread(target=worker_loop, args=(config["token"], chat_id), daemon=True).start()
             threading.Thread(target=monitor_loop, args=(chat_id,), daemon=True).start()
-            bot.answer_callback_query(call.id, "Starting Ultra-Turbo...")
+            bot.answer_callback_query(call.id, "Starting V11...")
         
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_menu())
     
@@ -291,7 +282,7 @@ def handle_query(call):
     elif call.data == "status":
         with stats_lock:
             text = (
-                f"📊 *Current Stats*\n"
+                f"📊 *Current Stats V11*\n"
                 f"Gained: +{stats['total_gained']:,}\n"
                 f"Balance: {stats['current_balance']:,}\n"
                 f"Speed: {stats['speed_rpm']:,} gold/min\n"
@@ -318,5 +309,5 @@ def process_target(message):
         bot.send_message(message.chat.id, "❌ Invalid number.")
 
 if __name__ == "__main__":
-    print("[V10] Bot is active...")
+    print("[V11] Bot is active...")
     bot.infinity_polling()
