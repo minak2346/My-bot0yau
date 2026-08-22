@@ -17,7 +17,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
-CONFIG_FILE = "farm_config_v8.json"
+CONFIG_FILE = "farm_config_v10.json"
 
 WS_HEADERS = {
     "User-Agent": "Android SM-S918B",
@@ -28,9 +28,6 @@ WS_HEADERS = {
 # ==========================================
 # BOT INITIALIZATION
 # ==========================================
-if not TELEGRAM_BOT_TOKEN:
-    print("[CRITICAL] TELEGRAM_BOT_TOKEN environment variable is missing!")
-
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
     telebot.apihelper.CONNECT_TIMEOUT = 60
@@ -42,9 +39,13 @@ except Exception as e:
 # ==========================================
 # STATE
 # ==========================================
-config = {"owner_id": None, "token": None, "target_gain": 150000000, "workers": 3}
+config = {
+    "owner_id": None, 
+    "token": None, 
+    "target_gain": 150000000,
+    "workers": 1 # Default to 1 as requested
+}
 is_running = False
-farm_threads = []
 last_update_msg_id = None
 
 stats = {
@@ -52,7 +53,9 @@ stats = {
     "claims_count": 0,
     "current_balance": 0,
     "start_balance": 0,
-    "last_error": "None"
+    "last_error": "None",
+    "active_workers": 0,
+    "speed_rpm": 0 # Rewards Per Minute
 }
 stats_lock = threading.Lock()
 
@@ -93,261 +96,227 @@ def send_update(chat_id, text, auto_delete=False):
         if auto_delete:
             last_update_msg_id = msg.message_id
         return msg.message_id
-    except Exception as e:
-        print(f"[TG] Failed to send update: {e}")
-        return None
+    except: return None
 
 def delete_msg_after(chat_id, msg_id, delay=5):
     def run():
         time.sleep(delay)
-        try:
-            bot.delete_message(chat_id, msg_id)
+        try: bot.delete_message(chat_id, msg_id)
         except: pass
     threading.Thread(target=run, daemon=True).start()
 
 # ==========================================
-# CORE FARMING LOGIC (TURBO V8 - GAIN BASED)
+# ULTRA TURBO WORKER (Optimized for Single Connection)
 # ==========================================
 def worker_loop(token, chat_id, worker_id):
     global is_running, stats
     
-    print(f"[FARM] Worker {worker_id} started.")
+    print(f"[WORKER-{worker_id}] Ultra-Turbo Started.")
+    with stats_lock:
+        stats["active_workers"] += 1
+        
     while is_running:
-        ws = None
         try:
             ws = websocket.create_connection(
-                WS_URL + "?access_token=" + token,
+                WS_URL,
                 sslopt={"cert_reqs": ssl.CERT_NONE},
                 header=WS_HEADERS,
-                timeout=30
+                timeout=15
             )
             
             # Login
             ws.send(msgpack.packb({"route": "mytelLogin", "data": {"accessToken": token, "language": "my"}, "msgId": 1}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             
             login_data = None
-            for _ in range(40):
+            for _ in range(20):
                 m = ws.recv()
+                if isinstance(m, str): continue
                 d = msgpack.unpackb(m, raw=False)
                 if d.get("route") == "mytelLogin":
                     login_data = d.get("data", {})
                     break
             
-            if not login_data or not login_data.get("username"):
-                time.sleep(10)
+            if not login_data or not login_data.get("ok"):
+                print(f"[WORKER-{worker_id}] Login Failed.")
+                time.sleep(5)
                 continue
             
-            username = login_data.get("username")
-            password = login_data.get("password")
-            balance = login_data.get("cash", 0)
+            with stats_lock:
+                if stats["start_balance"] == 0:
+                    stats["start_balance"] = login_data.get("cash", 0)
+                stats["current_balance"] = login_data.get("cash", 0)
             
-            if worker_id == 0:
-                with stats_lock:
-                    if stats["start_balance"] == 0:
-                        stats["start_balance"] = balance
-                    stats["current_balance"] = balance
-                send_update(chat_id, f"✅ *Turbo Farm Started!*\n💰 Start Balance: {balance:,}\n🎯 Target Gain: {config['target_gain']:,}\n🚀 Workers: {config['workers']}", auto_delete=True)
-            
-            # Enter room
-            ws.send(msgpack.packb({"route": "play", "data": {"playerId": username, "password": password, "index": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-            time.sleep(1)
+            # Room Bypass
+            ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+            time.sleep(0.5)
 
-            msg_id_counter = 100
+            msg_id_counter = 5000
             last_gold_time = time.time()
             
             while is_running:
-                # TURBO BURST
-                for _ in range(20):
+                # ULTRA BURST: Send 50 claims rapidly
+                for _ in range(50):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
-                time.sleep(0.2)
-                
-                # Listen for updates
+                # Rapid Response Processing
+                ws.settimeout(0.5)
                 try:
-                    ws.settimeout(0.1)
-                    while True:
+                    for _ in range(60): # Process more messages per loop
                         m = ws.recv()
+                        if isinstance(m, str): continue
                         d = msgpack.unpackb(m, raw=False)
                         
                         if d.get("route") == "reloadCash":
                             inner = d.get("data", {})
-                            with stats_lock:
-                                change = inner.get("changeCash", 0)
-                                if change > 0:
+                            change = inner.get("changeCash", 0)
+                            if change > 0:
+                                with stats_lock:
                                     stats["total_gained"] += change
                                     stats["current_balance"] = inner.get("newCash", stats["current_balance"])
                                     stats["claims_count"] += 1
-                                    last_gold_time = time.time()
+                                last_gold_time = time.time()
                         
                         elif d.get("data", {}).get("ok") == False:
+                            inner = d.get("data", {})
                             with stats_lock:
-                                stats["last_error"] = d.get("data", {}).get("msg", "Action Failed")
+                                stats["last_error"] = inner.get("msg", "Action Failed")
+                except websocket.WebSocketTimeoutException:
+                    pass
                 except: pass
                 
-                # GAIN TARGET CHECK
-                if stats["total_gained"] >= config["target_gain"]:
-                    if worker_id == 0:
-                        send_update(chat_id, f"🎉 *Target Gain Reached!*\nTotal Gained: +{stats['total_gained']:,}\nFinal Balance: {stats['current_balance']:,}")
-                    is_running = False
+                # Check target
+                with stats_lock:
+                    if stats["total_gained"] >= config["target_gain"]:
+                        is_running = False
+                        break
+                
+                # Watchdog: Reconnect if no gold for 25s
+                if time.time() - last_gold_time > 25:
                     break
                 
-                # Reconnect if stuck
-                if time.time() - last_gold_time > 40:
-                    break
-                    
+                # No sleep or very minimal sleep for max speed
+                time.sleep(0.01)
+            
             ws.close()
         except Exception as e:
-            with stats_lock:
-                stats["last_error"] = str(e)
-            time.sleep(5)
-
-def farm_manager(token, chat_id):
-    global farm_threads, is_running, stats
+            print(f"[WORKER-{worker_id}] Error: {e}")
+            time.sleep(3)
+            
     with stats_lock:
-        stats["total_gained"] = 0
-        stats["claims_count"] = 0
-        stats["start_balance"] = 0
-        
-    farm_threads = []
-    for i in range(config["workers"]):
-        t = threading.Thread(target=worker_loop, args=(token, chat_id, i), daemon=True)
-        t.start()
-        farm_threads.append(t)
-        time.sleep(2)
+        stats["active_workers"] -= 1
+
+# ==========================================
+# MONITOR
+# ==========================================
+def monitor_loop(chat_id):
+    global is_running, stats
+    last_gained = 0
+    start_time = time.time()
     
-    last_claims = 0
     while is_running:
         time.sleep(10)
         with stats_lock:
-            if stats["claims_count"] >= last_claims + 20:
-                last_claims = stats["claims_count"]
-                msg = (
-                    f"📈 *Turbo Farm Update*\n"
-                    f"New Gold Gained: +{stats['total_gained']:,}\n"
-                    f"Target Gain: {config['target_gain']:,}\n"
-                    f"Total Balance: {stats['current_balance']:,}\n"
-                    f"Status: 🟢 Running ({config['workers']} Workers)"
-                )
-                send_update(chat_id, msg, auto_delete=True)
+            current_gained = stats["total_gained"]
+            elapsed = (time.time() - start_time) / 60
+            if elapsed > 0:
+                stats["speed_rpm"] = int(current_gained / elapsed)
+            
+            status_text = (
+                f"⚡️ *Turbo V10 (Single Connection)*\n"
+                f"📈 Gained: +{current_gained:,}\n"
+                f"💰 Balance: {stats['current_balance']:,}\n"
+                f"🚀 Speed: ~{stats['speed_rpm']:,} gold/min\n"
+                f"🎯 Target: {config['target_gain']:,}"
+            )
+            send_update(chat_id, status_text, auto_delete=True)
+            
+            if current_gained >= config["target_gain"]:
+                send_update(chat_id, f"✅ *Target Reached!*\nTotal Gained: +{current_gained:,}\nFinal Balance: {stats['current_balance']:,}")
+                is_running = False
 
 # ==========================================
-# TELEGRAM HANDLERS
+# TELEGRAM
 # ==========================================
 def get_menu():
     markup = InlineKeyboardMarkup()
-    btn = "🛑 Stop Turbo Farm" if is_running else "🚀 Start Turbo Farm"
+    btn = "🛑 Stop Bot" if is_running else "⚡️ Start Ultra-Turbo"
     markup.add(InlineKeyboardButton(btn, callback_data="toggle"))
     markup.add(InlineKeyboardButton("🔑 Set Token", callback_data="set_token"))
+    markup.add(InlineKeyboardButton("🎯 Set Target", callback_data="set_target"))
     markup.add(InlineKeyboardButton("📊 Status", callback_data="status"))
-    markup.add(InlineKeyboardButton("⚙️ Set Workers", callback_data="set_workers"))
-    markup.add(InlineKeyboardButton("🎯 Set Target Gain", callback_data="set_target"))
     return markup
 
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     global config
-    if config["owner_id"] is None:
-        config["owner_id"] = message.chat.id
-        save_config()
-    bot.send_message(message.chat.id, "🎮 *FISH HUNTER TURBO BOT V8*\nMode: Gain-Based Multi-Farm", reply_markup=get_menu(), parse_mode="Markdown")
+    config["owner_id"] = message.chat.id
+    save_config()
+    bot.send_message(message.chat.id, "🔥 *Fish Hunter Turbo V10*\nOptimized for Single-Connection Speed.", reply_markup=get_menu(), parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
-    global is_running
+    global is_running, stats
     chat_id = call.message.chat.id
-    if config["owner_id"] != chat_id: return
     
     if call.data == "toggle":
         if is_running:
             is_running = False
-            bot.answer_callback_query(call.id, "Stopping Turbo Farm...")
+            bot.answer_callback_query(call.id, "Stopping...")
         else:
             if not config["token"]:
                 bot.answer_callback_query(call.id, "Set token first!", show_alert=True)
                 return
             is_running = True
-            threading.Thread(target=farm_manager, args=(config["token"], chat_id), daemon=True).start()
-            bot.answer_callback_query(call.id, "Starting Turbo Farm...")
+            # Reset
+            with stats_lock:
+                for k in stats:
+                    if isinstance(stats[k], (int, float)): stats[k] = 0
+                stats["last_error"] = "None"
+            
+            threading.Thread(target=worker_loop, args=(config["token"], chat_id, 1), daemon=True).start()
+            threading.Thread(target=monitor_loop, args=(chat_id,), daemon=True).start()
+            bot.answer_callback_query(call.id, "Starting Ultra-Turbo...")
+        
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_menu())
-        
+    
     elif call.data == "set_token":
-        msg = bot.send_message(chat_id, "🔑 Send your Access Token or Game URL:")
+        msg = bot.send_message(chat_id, "🔑 Send Token or Game URL:")
         bot.register_next_step_handler(msg, process_token)
-        bot.answer_callback_query(call.id)
-        
-    elif call.data == "set_workers":
-        msg = bot.send_message(chat_id, "⚙️ How many workers? (1-10):")
-        bot.register_next_step_handler(msg, process_workers)
-        bot.answer_callback_query(call.id)
-        
+    
     elif call.data == "set_target":
-        msg = bot.send_message(chat_id, "🎯 How much gold do you want to gain? (e.g. 150000000):")
+        msg = bot.send_message(chat_id, "🎯 Enter target gain (e.g. 150000000):")
         bot.register_next_step_handler(msg, process_target)
-        bot.answer_callback_query(call.id)
         
     elif call.data == "status":
         with stats_lock:
-            status = "🟢 Running" if is_running else "🔴 Stopped"
             text = (
-                f"📊 *Turbo Farm Status*\n"
-                f"State: {status}\n"
-                f"Workers: {config['workers']}\n"
-                f"Gained so far: +{stats['total_gained']:,}\n"
-                f"Target Gain: {config['target_gain']:,}\n"
-                f"Current Balance: {stats['current_balance']:,}\n"
-                f"Last Error: {stats['last_error']}"
+                f"📊 *Current Stats*\n"
+                f"Gained: +{stats['total_gained']:,}\n"
+                f"Balance: {stats['current_balance']:,}\n"
+                f"Speed: {stats['speed_rpm']:,} gold/min\n"
+                f"Error: {stats['last_error']}"
             )
-        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
-        delete_msg_after(chat_id, msg.message_id, 15)
-        bot.answer_callback_query(call.id)
+        bot.send_message(chat_id, text, parse_mode="Markdown")
 
 def process_token(message):
     token = parse_token(message.text)
-    chat_id = message.chat.id
-    try: bot.delete_message(chat_id, message.message_id)
-    except: pass
-    
     if token:
         config["token"] = token
         save_config()
-        msg = bot.send_message(chat_id, "✅ Token updated!")
-        delete_msg_after(chat_id, msg.message_id, 3)
+        bot.send_message(message.chat.id, "✅ Token Updated.")
     else:
-        msg = bot.send_message(chat_id, "❌ Invalid token.")
-        delete_msg_after(chat_id, msg.message_id, 3)
-
-def process_workers(message):
-    chat_id = message.chat.id
-    try:
-        val = int(message.text)
-        if 1 <= val <= 10:
-            config["workers"] = val
-            save_config()
-            bot.send_message(chat_id, f"✅ Workers set to {val}")
-        else:
-            bot.send_message(chat_id, "❌ Enter a number between 1 and 10.")
-    except:
-        bot.send_message(chat_id, "❌ Invalid number.")
+        bot.send_message(message.chat.id, "❌ Invalid Token.")
 
 def process_target(message):
-    chat_id = message.chat.id
     try:
-        val = int(message.text)
-        if val > 0:
-            config["target_gain"] = val
-            save_config()
-            bot.send_message(chat_id, f"✅ Target Gain set to +{val:,}")
-        else:
-            bot.send_message(chat_id, "❌ Enter a positive number.")
+        val = int(message.text.replace(",", ""))
+        config["target_gain"] = val
+        save_config()
+        bot.send_message(message.chat.id, f"🎯 Target set to {val:,}")
     except:
-        bot.send_message(chat_id, "❌ Invalid number.")
+        bot.send_message(message.chat.id, "❌ Invalid number.")
 
 if __name__ == "__main__":
-    print("[STARTUP] Turbo Bot V8 (Gain-Based) is running...")
-    while True:
-        try:
-            bot.infinity_polling(timeout=60)
-        except Exception as e:
-            print(f"[POLLING] Error: {e}")
-            time.sleep(5)
+    print("[V10] Bot is active...")
+    bot.infinity_polling()
