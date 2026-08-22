@@ -1,177 +1,311 @@
-import telebot
-import websocket
+Import websocket
 import msgpack
-import ssl
+import json
 import time
 import threading
-import json
-import sys
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import ssl
 import os
+import sys
 
-# Force unbuffered output for GitHub Actions
+# Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
 
-# Config
+# ==========================================
+# CONFIGURATION
+# ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
+CONFIG_FILE = "farm_config_v6.json"
 
-# Global State
-user_state = {
-    "token": "",
-    "running": False,
-    "kills": 0,
-    "gold_gained": 0,
-    "claims": 0,
-    "last_balance": 0,
-    "login_status": "Not Logged In"
+WS_HEADERS = {
+    "User-Agent": "Android SM-S918B",
+    "Origin": "https://fishmya.ugame.vn",
+    "X-Requested-With": "com.mytel.myid"
 }
 
-WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
-HEADERS = [
-    "User-Agent: Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Origin: https://fishmya.ugame.vn"
-]
+# ==========================================
+# BOT INITIALIZATION
+# ==========================================
+if not TELEGRAM_BOT_TOKEN:
+    print("[CRITICAL] TELEGRAM_BOT_TOKEN environment variable is missing!")
 
-def update_status(chat_id, message_id=None):
-    status_text = (
-        f"🎮 *FISH HUNTER SNIPER BOT*\n\n"
-        f"🔐 *Login Status:* {user_state['login_status']}\n"
-        f"💰 *Current Gold:* {user_state['last_balance']:,}\n"
-        f"🎯 *Fish Sniped:* {user_state['kills']}\n"
-        f"🎁 *Gold Claims:* {user_state['claims']}\n"
-        f"📈 *Total Gained:* {user_state['gold_gained']:,}\n\n"
-        f"🔄 *Status:* {'🟢 Running' if user_state['running'] else '🔴 Stopped'}\n"
-        f"📍 *Room:* Room 3 (Max Gold)\n"
-        f"🚀 *Bullet:* Bullet 6 (500,000 Gold)"
-    )
-    
-    try:
-        if message_id:
-            bot.edit_message_text(status_text, chat_id, message_id, parse_mode="Markdown")
-        else:
-            msg = bot.send_message(chat_id, status_text, parse_mode="Markdown")
-            return msg.message_id
-    except:
-        pass
+try:
+    bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    telebot.apihelper.CONNECT_TIMEOUT = 60
+    telebot.apihelper.READ_TIMEOUT = 60
+except Exception as e:
+    print(f"[CRITICAL] Failed to initialize bot: {e}")
+    sys.exit(1)
 
-def sniper_thread(chat_id, msg_id):
-    while user_state["running"]:
+# ==========================================
+# STATE
+# ==========================================
+config = {"owner_id": None, "token": None, "target": 15000000000}
+is_running = False
+ws_conn = None
+farm_thread = None
+last_update_msg_id = None
+
+stats = {
+    "total_gained": 0,
+    "claims_count": 0,
+    "current_balance": 0,
+    "start_balance": 0,
+    "last_error": "None"
+}
+stats_lock = threading.Lock()
+
+def load_config():
+    global config
+    if os.path.exists(CONFIG_FILE):
         try:
-            user_state["login_status"] = "⏳ Connecting..."
-            update_status(chat_id, msg_id)
-            
-            ws = websocket.create_connection(WS_URL + "?access_token=" + user_state["token"], header=HEADERS, sslopt={"cert_reqs": ssl.CERT_NONE}, timeout=20)
-            ws.send(msgpack.packb({"route": "mytelLogin", "data": {"accessToken": user_state["token"], "language": "my"}, "msgId": 1}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-            
-            user_id = 0
-            username = ""
-            password = ""
-            
-            # Heartbeat
-            def hb():
-                while ws.connected and user_state["running"]:
-                    try:
-                        ws.send(msgpack.packb({"route": "heartBeat", "data": {}, "msgId": 999}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-                        time.sleep(15)
-                    except: break
-            threading.Thread(target=hb, daemon=True).start()
-            
-            # 5-minute cycle
-            cycle_start = time.time()
-            while user_state["running"] and time.time() - cycle_start < 300:
-                try:
-                    data = ws.recv()
-                    if not data: break
-                    
-                    if isinstance(data, str): d = json.loads(data)
-                    else: d = msgpack.unpackb(data, raw=False)
-                    
-                    route = d.get("route")
-                    inner = d.get("data", {})
-                    
-                    if d.get("msgId") == 1:
-                        if d.get("ok"):
-                            user_state["login_status"] = "✅ Login Successful"
-                            user_state["last_balance"] = inner.get("cash", 0)
-                            username = inner.get("username")
-                            password = inner.get("password")
-                            user_id = inner.get("userId")
-                            update_status(chat_id, msg_id)
-                            
-                            # Enter Room 3
-                            ws.send(msgpack.packb({"route": "play", "data": {"playerId": username, "password": password, "index": 3}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-                            # Exploit Claim
-                            ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": 3}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-                        else:
-                            user_state["login_status"] = "❌ Login Failed"
-                            update_status(chat_id, msg_id)
-                            user_state["running"] = False
-                            break
-                            
-                    elif route == "OnUpdateObject":
-                        objs = inner if isinstance(inner, list) else [inner]
-                        for obj in objs:
-                            if obj.get("h", 1.0) < 0.8: # Sniper target
-                                ws.send(msgpack.packb({"route": "clientHitFish", "data": {"btype": 6, "skillType": 0, "fIds": [obj.get("id")]}, "msgId": 100}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
-                    
-                    elif route == "OnObjectDie":
-                        if inner.get("playerId") == user_id:
-                            user_state["kills"] += 1
-                            user_state["gold_gained"] += inner.get("value", 0)
-                            if user_state["kills"] % 5 == 0: update_status(chat_id, msg_id)
-                            
-                    elif route == "reloadCash":
-                        user_state["claims"] += 1
-                        user_state["last_balance"] = inner.get("newCash", user_state["last_balance"])
-                        if user_state["claims"] % 10 == 0: update_status(chat_id, msg_id)
-                        # Keep claiming
-                        ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": 4}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+            with open(CONFIG_FILE, "r") as f:
+                config.update(json.load(f))
+        except: pass
 
-                except: continue
+def save_config():
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f)
+
+load_config()
+
+# ==========================================
+# UTILS
+# ==========================================
+def parse_token(text):
+    text = text.strip()
+    if "access_token=" in text:
+        try:
+            return text.split("access_token=")[1].split("&")[0]
+        except: return None
+    return text if text.startswith("eyJ") else None
+
+def send_update(chat_id, text, auto_delete=False):
+    global last_update_msg_id
+    try:
+        if auto_delete and last_update_msg_id:
+            try:
+                bot.delete_message(chat_id, last_update_msg_id)
+            except: pass
+        
+        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
+        if auto_delete:
+            last_update_msg_id = msg.message_id
+        return msg.message_id
+    except Exception as e:
+        print(f"[TG] Failed to send update: {e}")
+        return None
+
+def delete_msg_after(chat_id, msg_id, delay=5):
+    def run():
+        time.sleep(delay)
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except: pass
+    threading.Thread(target=run, daemon=True).start()
+
+# ==========================================
+# CORE FARMING LOGIC
+# ==========================================
+def farm_loop(token, chat_id):
+    global is_running, ws_conn, stats
+    
+    print(f"[FARM] Starting loop for {chat_id}")
+    while is_running:
+        try:
+            ws = websocket.create_connection(
+                WS_URL,
+                sslopt={"cert_reqs": ssl.CERT_NONE},
+                header=WS_HEADERS,
+                timeout=30
+            )
+            ws_conn = ws
+            
+            # Login
+            ws.send(msgpack.packb({"route": "mytelLogin", "data": {"accessToken": token, "language": "my"}, "msgId": 1}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+            
+            login_data = None
+            for _ in range(40):
+                m = ws.recv()
+                d = msgpack.unpackb(m, raw=False)
+                if d.get("msgId") == 1:
+                    login_data = d.get("data", {})
+                    break
+            
+            # ၁။ Login Failed ဖြစ်ရင် ရပ်မသွားဘဲ Auto ပြန်စအောင် ပြင်ထားခြင်း
+            if not login_data or not login_data.get("ok"):
+                err_msg = login_data.get("msg", "Unknown Login Error") if login_data else "No Response"
+                send_update(chat_id, f"❌ *Login Failed*\nReason: {err_msg}\n🔄 စက္ကန့် ၃၀ အကြာတွင် Auto ပြန်စပါမည်...", auto_delete=True)
+                time.sleep(30) # ခဏနားပြီး
+                continue # အစကနေ Auto ပြန်ချိတ်ပါမယ်
+            
+            balance = login_data.get("cash", 0)
+            with stats_lock:
+                stats["start_balance"] = balance
+                stats["current_balance"] = balance
+                stats["total_gained"] = 0
+                stats["claims_count"] = 0
+            
+            send_update(chat_id, f"✅ *Farm Started!*\n💰 Current Balance: {balance:,}\n🎯 Target: {config['target']:,}")
+            
+            # CRITICAL: Enter room to bypass "Silent Block"
+            ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+            time.sleep(1)
+
+            last_msg_claims = 0
+            msg_id_counter = 100
+            
+            # ၃။ Gold မတက်တာကို စစ်ဆေးရန် အချိန်မှတ်ထားခြင်း
+            last_gold_time = time.time()
+            
+            while is_running:
+                # Burst of 10 claims
+                for _ in range(10):
+                    ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+                    msg_id_counter += 1
+                
+                # Listen for updates
+                ws.settimeout(2.0)
+                try:
+                    while True:
+                        m = ws.recv()
+                        d = msgpack.unpackb(m, raw=False)
+                        
+                        if d.get("route") == "reloadCash":
+                            inner = d.get("data", {})
+                            with stats_lock:
+                                change = inner.get("changeCash", 0)
+                                if change > 0:
+                                    stats["total_gained"] += change
+                                    stats["current_balance"] = inner.get("newCash", stats["current_balance"])
+                                    stats["claims_count"] += 1
+                                    # Gold တက်ရင် အချိန်ကို အသစ်ပြန်မှတ်ပါမယ်
+                                    last_gold_time = time.time()
+                        
+                        elif d.get("data", {}).get("ok") == False:
+                            inner = d.get("data", {})
+                            with stats_lock:
+                                stats["last_error"] = inner.get("msg", "Action Failed")
+                except websocket.WebSocketTimeoutException:
+                    pass
+                except: pass
+                
+                # ၃။ စက္ကန့် ၃၀ အတွင်း Gold လုံးဝ မတက်ရင် Loop ကိုဖြတ်ပြီး Auto အစကနေ ပြန်စပါမယ်
+                if time.time() - last_gold_time > 30:
+                    send_update(chat_id, "⚠️ *Gold ရပ်နေပါသည်*\n🔄 Auto အစကနေ ပြန်စနေပါသည်...", auto_delete=True)
+                    break
+                
+                # Send update every 10 successful claims
+                with stats_lock:
+                    if stats["claims_count"] >= last_msg_claims + 10:
+                        last_msg_claims = stats["claims_count"]
+                        msg = (
+                            f"📈 *Gold Update*\n"
+                            f"Claims: {stats['claims_count']}\n"
+                            f"Gained: +{stats['total_gained']:,}\n"
+                            f"Balance: {stats['current_balance']:,}"
+                        )
+                        send_update(chat_id, msg, auto_delete=True)
+                        
+                        if stats["current_balance"] >= config["target"]:
+                            send_update(chat_id, f"🎉 *Target Reached!*\nFinal Balance: {stats['current_balance']:,}")
+                            is_running = False
+                            break
+                
+                time.sleep(0.5)
             
             ws.close()
-            time.sleep(5) # Cooldown between cycles
+        # ၂။ Error တစ်ခုခုဖြစ်ရင် (Network ကျတာမျိုး) ၅ စက္ကန့်နေရင် Auto ပြန်ချိတ်ပါမယ်
         except Exception as e:
-            user_state["login_status"] = f"⚠️ Error: {str(e)[:20]}"
-            update_status(chat_id, msg_id)
-            time.sleep(10)
+            print(f"[FARM] Error: {e}. Reconnecting in 5s...")
+            with stats_lock:
+                stats["last_error"] = str(e)
+            time.sleep(5)
+    
+    print("[FARM] Loop ended.")
+
+# ==========================================
+# TELEGRAM HANDLERS
+# ==========================================
+def get_menu():
+    markup = InlineKeyboardMarkup()
+    btn = "🛑 Stop Farm" if is_running else "▶️ Start Farm"
+    markup.add(InlineKeyboardButton(btn, callback_data="toggle"))
+    markup.add(InlineKeyboardButton("🔑 Set Token", callback_data="set_token"))
+    markup.add(InlineKeyboardButton("📊 Status", callback_data="status"))
+    return markup
 
 @bot.message_handler(commands=['start'])
-def start(message):
-    markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Set Token", "Start Sniper", "Stop Bot")
-    bot.send_message(message.chat.id, "Welcome to Fish Hunter Sniper Bot! Use the buttons below to control.", reply_markup=markup)
+def cmd_start(message):
+    global config
+    if config["owner_id"] is None:
+        config["owner_id"] = message.chat.id
+        save_config()
+    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Room Bypass)*\nExploit: claimItemOnline in room.", reply_markup=get_menu(), parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == "Set Token")
-def set_token_prompt(message):
-    bot.send_message(message.chat.id, "Please send your game token or URL.")
-    bot.register_next_step_handler(message, save_token)
-
-def save_token(message):
-    token = message.text
-    if "access_token=" in token:
-        token = token.split("access_token=")[1].split("&")[0]
-    user_state["token"] = token
-    bot.send_message(message.chat.id, "✅ Token Saved!")
-
-@bot.message_handler(func=lambda m: m.text == "Start Sniper")
-def start_bot(message):
-    if not user_state["token"]:
-        bot.send_message(message.chat.id, "❌ Please set token first!")
-        return
-    if user_state["running"]:
-        bot.send_message(message.chat.id, "🟡 Bot is already running.")
-        return
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    global is_running, farm_thread
+    chat_id = call.message.chat.id
+    if config["owner_id"] != chat_id: return
     
-    user_state["running"] = True
-    msg_id = update_status(message.chat.id)
-    threading.Thread(target=sniper_thread, args=(message.chat.id, msg_id), daemon=True).start()
+    if call.data == "toggle":
+        if is_running:
+            is_running = False
+            bot.answer_callback_query(call.id, "Stopping...")
+        else:
+            if not config["token"]:
+                bot.answer_callback_query(call.id, "Set token first!", show_alert=True)
+                return
+            is_running = True
+            farm_thread = threading.Thread(target=farm_loop, args=(config["token"], chat_id), daemon=True)
+            farm_thread.start()
+            bot.answer_callback_query(call.id, "Starting...")
+        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_menu())
+        
+    elif call.data == "set_token":
+        msg = bot.send_message(chat_id, "🔑 Send your Access Token or Game URL:")
+        bot.register_next_step_handler(msg, process_token)
+        bot.answer_callback_query(call.id)
+        
+    elif call.data == "status":
+        with stats_lock:
+            status = "🟢 Running" if is_running else "🔴 Stopped"
+            text = (
+                f"📊 *Farm Status*\n"
+                f"State: {status}\n"
+                f"Claims: {stats['claims_count']}\n"
+                f"Gained: {stats['total_gained']:,}\n"
+                f"Balance: {stats['current_balance']:,}\n"
+                f"Last Error: {stats['last_error']}"
+            )
+        msg = bot.send_message(chat_id, text, parse_mode="Markdown")
+        delete_msg_after(chat_id, msg.message_id, 10)
+        bot.answer_callback_query(call.id)
 
-@bot.message_handler(func=lambda m: m.text == "Stop Bot")
-def stop_bot(message):
-    user_state["running"] = False
-    bot.send_message(message.chat.id, "🛑 Bot Stopping...")
+def process_token(message):
+    token = parse_token(message.text)
+    chat_id = message.chat.id
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except: pass
+    
+    if token:
+        config["token"] = token
+        save_config()
+        msg = bot.send_message(chat_id, "✅ Token updated!")
+        delete_msg_after(chat_id, msg.message_id, 3)
+    else:
+        msg = bot.send_message(chat_id, "❌ Invalid token.")
+        delete_msg_after(chat_id, msg.message_id, 3)
 
 if __name__ == "__main__":
-    print("Bot is starting...")
-    bot.polling(none_stop=True)
+    print("[STARTUP] Bot V6 is running...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=60)
+        except Exception as e:
+            print(f"[POLLING] Error: {e}")
+            time.sleep(5)
