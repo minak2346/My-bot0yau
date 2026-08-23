@@ -158,7 +158,7 @@ def farm_loop(token, chat_id):
             last_gold_time = time.time()
             
             while is_running:
-                for _ in range(1500000):
+                for _ in range(300):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
