@@ -135,9 +135,8 @@ def farm_loop(token, chat_id):
                     break
             
             if not login_data or not login_data.get("ok"):
-                err_msg = login_data.get("msg", "Unknown Login Error") if login_data else "No Response"
-                send_update(chat_id, f"❌ *Login Failed*\nReason: {err_msg}\n🔄 စက္ကန့် ၃၀ အကြာတွင် Auto ပြန်စပါမည်...", auto_delete=True)
-                time.sleep(30)
+                # (Silent Reconnect) အသံတိတ် ၁၀ စက္ကန့်နားပြီး ပြန်ချိတ်ပါမည်
+                time.sleep(10)
                 continue
             
             balance = login_data.get("cash", 0)
@@ -147,18 +146,19 @@ def farm_loop(token, chat_id):
                 stats["total_gained"] = 0
                 stats["claims_count"] = 0
             
-            send_update(chat_id, f"✅ *Farm Started!*\n💰 Current Balance: {balance:,}\n🎯 Target: {config['target']:,}")
+            # (REMOVED) ✅ Farm Started စာကို အသံတိတ်ဖြစ်စေရန် ဖြုတ်ထားပါသည်
             
             ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             time.sleep(1)
 
-            last_msg_claims = 0
             msg_id_counter = 100
-            
             last_gold_time = time.time()
             
             while is_running:
-                for _ in range(80):
+                # ----------------------------------------------------
+                # Burst ကို ဆာဗာမဖြတ်ချအောင် 10 လို့ထားပေးထားပါတယ်
+                # ----------------------------------------------------
+                for _ in range(150):
                     ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
@@ -186,25 +186,16 @@ def farm_loop(token, chat_id):
                     pass
                 except: pass
                 
+                # ရွှေမတက်လျှင် အသံတိတ်ဖြတ်ပြီး အစကပြန်စပါမည်
                 if time.time() - last_gold_time > 30:
-                    send_update(chat_id, "⚠️ *Gold ရပ်နေပါသည်*\n🔄 Auto အစကနေ ပြန်စနေပါသည်...", auto_delete=True)
                     break
                 
+                # Target ပြည့်/မပြည့်ကိုသာ စစ်ဆေးပါမည်။ (Auto Update ဖြုတ်ထားပါသည်)
                 with stats_lock:
-                    if stats["claims_count"] >= last_msg_claims + 10:
-                        last_msg_claims = stats["claims_count"]
-                        msg = (
-                            f"📈 *Gold Update*\n"
-                            f"Claims: {stats['claims_count']}\n"
-                            f"Gained: +{stats['total_gained']:,}\n"
-                            f"Balance: {stats['current_balance']:,}"
-                        )
-                        send_update(chat_id, msg, auto_delete=True)
-                        
-                        if stats["current_balance"] >= config["target"]:
-                            send_update(chat_id, f"🎉 *Target Reached!*\nFinal Balance: {stats['current_balance']:,}")
-                            is_running = False
-                            break
+                    if stats["current_balance"] >= config["target"]:
+                        send_update(chat_id, f"🎉 *Target Reached!*\nFinal Balance: {stats['current_balance']:,}")
+                        is_running = False
+                        break
                 
                 time.sleep(0.001)
             
@@ -234,7 +225,7 @@ def cmd_start(message):
     if config["owner_id"] is None:
         config["owner_id"] = message.chat.id
         save_config()
-    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Room Bypass)*\nExploit: claimItemOnline in room.", reply_markup=get_menu(), parse_mode="Markdown")
+    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Silent Mode)*\nFarm နေချိန်အတွင်း စာဝင်လာမည်မဟုတ်ပါ။ Status ကို ကိုယ်တိုင်နှိပ်ကြည့်ပါ။", reply_markup=get_menu(), parse_mode="Markdown")
 
 @bot.message_handler(commands=['target'])
 def cmd_target(message):
@@ -285,7 +276,7 @@ def handle_query(call):
             is_running = True
             farm_thread = threading.Thread(target=farm_loop, args=(config["token"], chat_id), daemon=True)
             farm_thread.start()
-            bot.answer_callback_query(call.id, "Starting...")
+            bot.answer_callback_query(call.id, "Starting in background...")
         bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=get_menu())
         
     elif call.data == "set_token":
@@ -301,7 +292,7 @@ def handle_query(call):
                 f"State: {status}\n"
                 f"🎯 Target: {config['target']:,}\n"
                 f"Claims: {stats['claims_count']}\n"
-                f"Gained: {stats['total_gained']:,}\n"
+                f"Gained: +{stats['total_gained']:,}\n"
                 f"Balance: {stats['current_balance']:,}\n"
                 f"Last Error: {stats['last_error']}"
             )
@@ -326,7 +317,7 @@ def process_token(message):
         delete_msg_after(chat_id, msg.message_id, 3)
 
 if __name__ == "__main__":
-    print("[STARTUP] Bot V6 is running...")
+    print("[STARTUP] Bot V6 (Silent Mode) is running...")
     while True:
         try:
             bot.infinity_polling(timeout=60)
