@@ -8,6 +8,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import ssl
 import os
 import sys
+import random
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)
@@ -17,7 +18,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 WS_URL = "wss://api-fishmcloud.ugame.vn:2083"
-CONFIG_FILE = "farm_config_v6.json"
+CONFIG_FILE = "farm_config_v7.json"
 
 WS_HEADERS = {
     "User-Agent": "Android SM-S918B",
@@ -107,7 +108,7 @@ def delete_msg_after(chat_id, msg_id, delay=5):
     threading.Thread(target=run, daemon=True).start()
 
 # ==========================================
-# CORE FARMING LOGIC
+# CORE FARMING LOGIC (OPTIMIZED)
 # ==========================================
 def farm_loop(token, chat_id):
     global is_running, ws_conn, stats
@@ -135,7 +136,6 @@ def farm_loop(token, chat_id):
                     break
             
             if not login_data or not login_data.get("ok"):
-                # (Silent Reconnect) အသံတိတ် ၁၀ စက္ကန့်နားပြီး ပြန်ချိတ်ပါမည်
                 time.sleep(10)
                 continue
             
@@ -146,8 +146,6 @@ def farm_loop(token, chat_id):
                 stats["total_gained"] = 0
                 stats["claims_count"] = 0
             
-            # (REMOVED) ✅ Farm Started စာကို အသံတိတ်ဖြစ်စေရန် ဖြုတ်ထားပါသည်
-            
             ws.send(msgpack.packb({"route": "play", "data": {"roomId": 1}, "msgId": 2}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
             time.sleep(1)
 
@@ -155,14 +153,24 @@ def farm_loop(token, chat_id):
             last_gold_time = time.time()
             
             while is_running:
-                # ----------------------------------------------------
-                # Burst ကို ဆာဗာမဖြတ်ချအောင် 10 လို့ထားပေးထားပါတယ်
-                # ----------------------------------------------------
-                for _ in range(150):
-                    ws.send(msgpack.packb({"route": "claimItemOnline", "data": {"package": 5}, "msgId": msg_id_counter}, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
+                # ==============================================
+                # 🚀 OPTIMIZED BURST - 500 ကြိမ်အထိ တိုးမြှင့်
+                # ==============================================
+                burst_size = 500  # ← 150 ကနေ 500 ကို တိုးလိုက်တယ်
+                for _ in range(burst_size):
+                    # Package size ကိုလည်း ပိုကြီးအောင် လုပ်တယ်
+                    package = random.choice([5, 10, 50, 100])  # ← Random package size
+                    ws.send(msgpack.packb({
+                        "route": "claimItemOnline", 
+                        "data": {"package": package}, 
+                        "msgId": msg_id_counter
+                    }, use_bin_type=True), opcode=websocket.ABNF.OPCODE_BINARY)
                     msg_id_counter += 1
                 
-                ws.settimeout(2.0)
+                # ==============================================
+                # ⚡ Response Reading Speed တိုးမြှင့်
+                # ==============================================
+                ws.settimeout(0.5)  # ← 2.0 ကနေ 0.5 ကို လျှော့လိုက်တယ်
                 try:
                     while True:
                         m = ws.recv()
@@ -186,18 +194,19 @@ def farm_loop(token, chat_id):
                     pass
                 except: pass
                 
-                # ရွှေမတက်လျှင် အသံတိတ်ဖြတ်ပြီး အစကပြန်စပါမည်
-                if time.time() - last_gold_time > 30:
+                # ==============================================
+                # ⏱️ Gold မတက်ရင် ပိုမြန်မြန် ပြန်စ
+                # ==============================================
+                if time.time() - last_gold_time > 15:  # ← 30 ကနေ 15 ကို လျှော့လိုက်တယ်
                     break
                 
-                # Target ပြည့်/မပြည့်ကိုသာ စစ်ဆေးပါမည်။ (Auto Update ဖြုတ်ထားပါသည်)
                 with stats_lock:
                     if stats["current_balance"] >= config["target"]:
                         send_update(chat_id, f"🎉 *Target Reached!*\nFinal Balance: {stats['current_balance']:,}")
                         is_running = False
                         break
                 
-                time.sleep(0.001)
+                time.sleep(0.001)  # ← Minimal delay
             
             ws.close()
         except Exception as e:
@@ -209,7 +218,7 @@ def farm_loop(token, chat_id):
     print("[FARM] Loop ended.")
 
 # ==========================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS (Same as before)
 # ==========================================
 def get_menu():
     markup = InlineKeyboardMarkup()
@@ -225,7 +234,7 @@ def cmd_start(message):
     if config["owner_id"] is None:
         config["owner_id"] = message.chat.id
         save_config()
-    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V6 (Silent Mode)*\nFarm နေချိန်အတွင်း စာဝင်လာမည်မဟုတ်ပါ။ Status ကို ကိုယ်တိုင်နှိပ်ကြည့်ပါ။", reply_markup=get_menu(), parse_mode="Markdown")
+    bot.send_message(message.chat.id, "💰 *Gold Farm Bot V7 (Optimized)*\n\n🚀 Balance တိုးနှုန်း ပိုမြန်အောင် ပြင်ဆင်ထားပါတယ်။", reply_markup=get_menu(), parse_mode="Markdown")
 
 @bot.message_handler(commands=['target'])
 def cmd_target(message):
@@ -317,7 +326,7 @@ def process_token(message):
         delete_msg_after(chat_id, msg.message_id, 3)
 
 if __name__ == "__main__":
-    print("[STARTUP] Bot V6 (Silent Mode) is running...")
+    print("[STARTUP] Bot V7 (Optimized) is running...")
     while True:
         try:
             bot.infinity_polling(timeout=60)
