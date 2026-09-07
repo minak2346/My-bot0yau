@@ -94,6 +94,7 @@ class BotInstance:
             "current_balance": 0
         }
         self.stats_lock = threading.Lock()
+        self.current_target_id = None  # လက်ရှိပစ်နေတဲ့ ငါး ID
 
     def reset_stats(self):
         with self.stats_lock:
@@ -136,6 +137,7 @@ class BotInstance:
         self.login_handled = False
         self.play_handled = False
         self.in_game = False
+        self.current_target_id = None
         with self.fish_lock:
             self.fish_list.clear()
 
@@ -182,6 +184,9 @@ class BotInstance:
                     for df in dead_fish:
                         f_id = df.get("id")
                         if f_id in self.fish_list:
+                            # သေသွားတဲ့ငါးက လက်ရှိပစ်နေတဲ့ငါးဆိုရင် ရှင်းပစ်မယ်
+                            if f_id == self.current_target_id:
+                                self.current_target_id = None
                             del self.fish_list[f_id]
             elif route == "OnUpdateObject":
                 f_id = inner.get("id")
@@ -192,6 +197,8 @@ class BotInstance:
                 f_id = inner.get("id")
                 with self.fish_lock:
                     if f_id in self.fish_list:
+                        if f_id == self.current_target_id:
+                            self.current_target_id = None
                         del self.fish_list[f_id]
                 if inner.get("playerId") == self.game_creds.get("username"):
                     with self.stats_lock:
@@ -211,7 +218,6 @@ class BotInstance:
                         self.stats["start_balance"] = inner.get("cash", 0)
                         self.stats["current_balance"] = inner.get("cash", 0)
                     
-                    # 🔥 Login Success Message
                     if self.owner_id:
                         bot.send_message(
                             self.owner_id,
@@ -244,47 +250,82 @@ class BotInstance:
 
     def auto_shoot_loop(self, ws):
         self.shoot_alive = True
-        print(f"[{self.token[:10]}...] Speed {self.speed_multiplier}x")
+        print(f"🎯 Fish Hunter Mode - Killing fish one by one")
+        
         while self.is_running and self.shoot_alive and ws.connected and not self.is_restarting:
             try:
-                target_ids = []
+                # 📊 ငါးစာရင်းကို ယူပါ
                 with self.fish_lock:
-                    current_fish_ids = list(self.fish_list.keys())
-                    if current_fish_ids:
-                        target_ids = current_fish_ids[:2]
-
-                self.current_angle_deg += self.drag_direction * 0.05
-                if self.current_angle_deg >= 60.0:
-                    self.current_angle_deg = 60.0
-                    self.drag_direction = -1
-                elif self.current_angle_deg <= -60.0:
-                    self.current_angle_deg = -60.0
-                    self.drag_direction = 1
-
-                angle_rad = math.radians(self.current_angle_deg)
-                multiplier = self.speed_multiplier
-                batch_size = 10
-                num_batches = max(1, multiplier // batch_size)
-
-                for _ in range(num_batches):
-                    if not (ws.connected and self.is_running and not self.is_restarting): break
-                    for _ in range(batch_size):
-                        self.send_ws({
-                            "route": "shoot",
-                            "data": {"rad": angle_rad, "type": 4, "target": target_ids[0] if target_ids else -1, "rapidFire": True, "auto": True, "bulletSpeed": 1400},
-                            "msgId": 0
-                        })
-                        if target_ids:
-                            self.send_ws({
-                                "route": "clientHitFish",
-                                "data": {"btype": 4, "skillType": 0, "fIds": target_ids, "bulletSpeed": 1400},
-                                "msgId": 0
-                            })
-                    time.sleep(0.005)
-                time.sleep(0.01)
+                    fish_list_items = list(self.fish_list.values())
+                
+                if not fish_list_items:
+                    # ငါးမရှိရင် ခဏစောင့်ပါ
+                    self.current_target_id = None
+                    time.sleep(0.1)
+                    continue
+                
+                # 🎯 လက်ရှိပစ်နေတဲ့ ငါး ရှိသေးလား စစ်ပါ
+                target_fish = None
+                if self.current_target_id:
+                    for fish in fish_list_items:
+                        if fish.get('id') == self.current_target_id:
+                            target_fish = fish
+                            break
+                
+                # 🎯 ငါးအသစ် ရွေးပါ (လက်ရှိငါးမရှိရင်)
+                if not target_fish and fish_list_items:
+                    target_fish = fish_list_items[0]
+                    self.current_target_id = target_fish.get('id')
+                
+                if not target_fish:
+                    time.sleep(0.1)
+                    continue
+                
+                # 🔫 ငါးကို ပစ်ပါ
+                fish_id = target_fish.get('id')
+                if fish_id:
+                    angle_rad = math.radians(self.current_angle_deg)
+                    
+                    # ငါးကို ပစ်ပါ
+                    self.send_ws({
+                        "route": "shoot",
+                        "data": {
+                            "rad": angle_rad,
+                            "type": 4,
+                            "target": fish_id,
+                            "rapidFire": True,
+                            "auto": True,
+                            "bulletSpeed": 1400
+                        },
+                        "msgId": 0
+                    })
+                    
+                    self.send_ws({
+                        "route": "clientHitFish",
+                        "data": {
+                            "btype": 4,
+                            "skillType": 0,
+                            "fIds": [fish_id],
+                            "bulletSpeed": 1400
+                        },
+                        "msgId": 0
+                    })
+                    
+                    # 🔄 Angle ကို နည်းနည်းပြောင်းပါ
+                    self.current_angle_deg += self.drag_direction * 0.05
+                    if self.current_angle_deg >= 60.0:
+                        self.current_angle_deg = 60.0
+                        self.drag_direction = -1
+                    elif self.current_angle_deg <= -60.0:
+                        self.current_angle_deg = -60.0
+                        self.drag_direction = 1
+                
+                time.sleep(0.02)  # နည်းနည်း နှေးပါ
+                
             except Exception as e:
-                print(f"[{self.token[:10]}...] Shoot error: {e}")
+                print(f"Fish hunter error: {e}")
                 break
+        
         self.shoot_alive = False
 
     def use_4x_loop(self, ws):
@@ -297,6 +338,7 @@ class BotInstance:
     def start_game_actions(self, ws):
         if not self.is_running or self.is_restarting: return
         self.in_game = True
+        self.current_target_id = None
         self.send_ws({"route": "useItem", "data": {"type": 4}, "msgId": 0})
         self.send_ws({"route": "clientActiveGun", "data": {"btype": 4, "gun": "gun1", "skillType": "none", "locationX": 0, "locationY": 0, "bulletSpeed": 1400}, "msgId": 0})
         if not self.shoot_alive:
@@ -505,8 +547,14 @@ def select_token(message):
         return
     try:
         idx = int(parts[1]) - 1
-        msg = switch_token(idx)
-        bot.reply_to(message, msg)
+        if 0 <= idx < len(config_data["tokens"]):
+            if active_bot and active_bot.is_running:
+                stop_bot()
+            config_data["selected_index"] = idx
+            save_config()
+            bot.reply_to(message, f"✅ Selected: {config_data['tokens'][idx][:10]}...")
+        else:
+            bot.reply_to(message, "Invalid index.")
     except:
         bot.reply_to(message, "Invalid number.")
 
@@ -517,7 +565,14 @@ def status_cmd(message):
     status = "🔴 Stopped" if not active_bot or not active_bot.is_running else "🟢 Running"
     token = get_selected_token()
     token_show = token[:10] + "..." if token else "None"
-    bot.send_message(user_id, f"Status: {status}\nActive Token: {token_show}\nTotal Tokens: {len(config_data['tokens'])}")
+    fish_count = len(active_bot.fish_list) if active_bot else 0
+    bot.send_message(
+        user_id, 
+        f"Status: {status}\n"
+        f"Active Token: {token_show}\n"
+        f"Total Tokens: {len(config_data['tokens'])}\n"
+        f"🐟 Fish on Screen: {fish_count}"
+    )
 
 # ==========================================
 # MAIN
