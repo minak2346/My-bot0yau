@@ -29,7 +29,7 @@ WS_HEADERS = [
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # ==========================================
-# CONFIG MANAGEMENT (Tokens + Selected)
+# CONFIG MANAGEMENT
 # ==========================================
 config_data = {
     "owner_id": None,
@@ -210,8 +210,18 @@ class BotInstance:
                     with self.stats_lock:
                         self.stats["start_balance"] = inner.get("cash", 0)
                         self.stats["current_balance"] = inner.get("cash", 0)
+                    
+                    # 🔥 Login Success Message
                     if self.owner_id:
-                        bot.send_message(self.owner_id, f"✅ Login OK\n👤 {inner.get('nickname', 'User')}\n💰 {inner.get('cash', 0):,}")
+                        bot.send_message(
+                            self.owner_id,
+                            f"✅ Login Success!\n"
+                            f"👤 Nickname: {inner.get('nickname', 'Unknown')}\n"
+                            f"🆔 Username: {self.game_creds['username']}\n"
+                            f"💰 Balance: {inner.get('cash', 0):,}\n"
+                            f"🔑 Token: {self.token[:15]}..."
+                        )
+                    
                     if not self.heartbeat_alive:
                         threading.Thread(target=self.heartbeat_loop, args=(ws,), daemon=True).start()
                     time.sleep(0.5)
