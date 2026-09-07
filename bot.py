@@ -184,7 +184,6 @@ class BotInstance:
                     for df in dead_fish:
                         f_id = df.get("id")
                         if f_id in self.fish_list:
-                            # သေသွားတဲ့ငါးက လက်ရှိပစ်နေတဲ့ငါးဆိုရင် ရှင်းပစ်မယ်
                             if f_id == self.current_target_id:
                                 self.current_target_id = None
                             del self.fish_list[f_id]
@@ -274,8 +273,10 @@ class BotInstance:
                 
                 # 🎯 ငါးအသစ် ရွေးပါ (လက်ရှိငါးမရှိရင်)
                 if not target_fish and fish_list_items:
+                    # ပထမဆုံးငါးကို ရွေးပါ
                     target_fish = fish_list_items[0]
                     self.current_target_id = target_fish.get('id')
+                    print(f"🎯 New target: {self.current_target_id}")
                 
                 if not target_fish:
                     time.sleep(0.1)
@@ -286,7 +287,7 @@ class BotInstance:
                 if fish_id:
                     angle_rad = math.radians(self.current_angle_deg)
                     
-                    # ငါးကို ပစ်ပါ
+                    # ငါးကို ပစ်ပါ (တစ်ခါပဲ ပစ်မယ်)
                     self.send_ws({
                         "route": "shoot",
                         "data": {
@@ -300,6 +301,7 @@ class BotInstance:
                         "msgId": 0
                     })
                     
+                    # ငါးကို ထိကြောင်း အကြောင်းကြားမယ်
                     self.send_ws({
                         "route": "clientHitFish",
                         "data": {
@@ -312,15 +314,16 @@ class BotInstance:
                     })
                     
                     # 🔄 Angle ကို နည်းနည်းပြောင်းပါ
-                    self.current_angle_deg += self.drag_direction * 0.05
+                    self.current_angle_deg += self.drag_direction * 0.1
                     if self.current_angle_deg >= 60.0:
                         self.current_angle_deg = 60.0
                         self.drag_direction = -1
                     elif self.current_angle_deg <= -60.0:
                         self.current_angle_deg = -60.0
                         self.drag_direction = 1
-                
-                time.sleep(0.02)  # နည်းနည်း နှေးပါ
+                    
+                    # ငါးသေဖို့ ခဏစောင့်ပါ
+                    time.sleep(0.01)
                 
             except Exception as e:
                 print(f"Fish hunter error: {e}")
